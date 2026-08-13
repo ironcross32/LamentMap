@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  mudlet-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned Muddler 1.1.0 source
+        uses: actions/checkout@v4
+        with:
+          repository: demonnic/muddler
+          ref: 97125cd7806fe7fdce84533eb4b683fe2503b94d
+          path: .ci/muddler
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build pinned Muddler
+        run: |
+          chmod +x .ci/muddler/gradlew
+          .ci/muddler/gradlew -p .ci/muddler shadowJar --no-daemon
+      - name: Build Mudlet package
+        working-directory: accessible_lament_map
+        run: java -jar ../.ci/muddler/build/libs/muddle-1.1.0-all.jar
+      - name: Verify expected package
+        shell: pwsh
+        run: |
+          $package = "accessible_lament_map/build/Accessible Lament Map.mpackage"
+          if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Expected package was not produced: $package" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: accessible-lament-map
+          path: accessible_lament_map/build/Accessible Lament Map.mpackage
+          if-no-files-found: error
+
+  portable-zip:
+    needs: mudlet-package
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: accessible-lament-map
+          path: mudlet-package
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.95.0-x86_64-pc-windows-msvc --profile minimal
+          rustup default 1.95.0-x86_64-pc-windows-msvc
+      - name: Bootstrap Prism 0.17.3
+        shell: pwsh
+        run: ./scripts/bootstrap-prism.ps1
+      - name: Build release binaries
+        run: cargo build --release --bin LamentMapper --bin pack-sounds
+      - name: Validate committed sound pack
+        run: cargo run --release --bin pack-sounds -- --validate sounds.pack
+      - name: Generate standalone guide
+        shell: pwsh
+        run: ./scripts/build-guide.ps1
+      - name: Assemble portable ZIP
+        shell: pwsh
+        run: |
+          $package = Get-ChildItem mudlet-package -Recurse -Filter *.mpackage | Select-Object -First 1
+          if (-not $package) { throw "Downloaded Mudlet package was not found" }
+          ./scripts/package-release.ps1 -MudletPackage $package.FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LamentMapper-windows-x64
+          path: dist/LamentMapper-windows-x64.zip
+          if-no-files-found: error
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME "dist/LamentMapper-windows-x64.zip" --generate-notes --verify-tag

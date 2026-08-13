@@ -1,0 +1,10 @@
+[
+  {
+    "name": "LamentMapper setup",
+    "regex": "^lamentmapper\\s+setup\\s*$"
+  },
+  {
+    "name": "LamentMapper status",
+    "regex": "^lamentmapper\\s+status\\s*$"
+  }
+]

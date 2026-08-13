@@ -1,0 +1,11 @@
+[
+  {
+    "name": "LamentMapper prompt boundary",
+    "patterns": [
+      {
+        "pattern": "",
+        "type": "prompt"
+      }
+    ]
+  }
+]

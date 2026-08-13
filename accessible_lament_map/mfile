@@ -1,0 +1,7 @@
+{
+  "package": "Accessible Lament Map",
+  "version": "1.0.5",
+  "author": "LamentMapper contributors",
+  "title": "Streams Lament wilderness maps to the accessible LamentMapper explorer.",
+  "outputFile": true
+}

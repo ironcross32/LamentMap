@@ -1,0 +1,12 @@
+/target/
+/dist/
+/deps/
+/.tmp-prism-sdk/
+/config.toml
+/logs/
+*.mpackage
+*.zip
+sounds-src/
+
+/.tmp-muddler/
+assets/sounds/
