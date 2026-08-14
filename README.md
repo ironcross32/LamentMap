@@ -9,7 +9,7 @@ through Rodio.
 ## Requirements
 
 - Windows 10 or 11, x64
-- Mudlet with the bundled `Accessible Lament Map.mpackage` installed
+- Mudlet with the bundled `Accessible-Lament-Map.mpackage` installed
 - The bundled prism.dll beside LamentMapper.exe
 - The portable release files kept together in one directory
 
@@ -18,15 +18,16 @@ supported in this release.
 
 ## Setup
 
-1. Import `Accessible Lament Map.mpackage` into the desired Mudlet profile.
+1. Import `Accessible-Lament-Map.mpackage` into the desired Mudlet profile.
 2. In that profile, enter `lamentmapper setup auto`.
-3. Select the folder where LamentMapper should be installed.
+3. Select the parent folder that should contain the new `LamentMapper` folder.
 
 Automatic setup requires Windows x64 and Mudlet 4.6 or newer. It downloads the
-latest Windows x64 release over HTTPS, extracts it into the selected folder, and
-configures the inferred `LamentMapper.exe` path. Selecting an existing
-LamentMapper folder updates it in place. Files that are not in the release archive,
-including `config.toml`, are preserved.
+latest Windows x64 release over HTTPS, creates or reuses a `LamentMapper`
+subfolder beneath the selected folder, and configures its inferred
+`LamentMapper.exe` path. To update an existing installation in place, select the
+folder that contains its `LamentMapper` folder. Files that are not in the release
+archive, including `config.toml`, are preserved.
 
 For manual setup, download and extract the latest Windows x64 release ZIP, enter
 `lamentmapper setup manual`, and select the extracted `LamentMapper.exe`.
@@ -69,7 +70,8 @@ new-map-alert checkboxes. Settings are stored as `config.toml` beside the
 executable. Missing known settings receive defaults. If the file contains an
 unsupported version, unknown setting, or invalid value, LamentMapper renames it
 to the next available `config.toml.bak`, `.bak.1`, and so on, then writes clean
-defaults atomically.
+defaults atomically. `mode = "speech"` intentionally disables terrain sounds;
+choose `speech_and_sounds` or `sounds` to enable them.
 
 ## Troubleshooting
 

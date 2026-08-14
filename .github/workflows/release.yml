@@ -33,12 +33,17 @@ jobs:
       - name: Verify expected package
         shell: pwsh
         run: |
-          $package = "accessible_lament_map/build/Accessible Lament Map.mpackage"
+          $package = "accessible_lament_map/build/Accessible-Lament-Map.mpackage"
           if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Expected package was not produced: $package" }
+          $spacedFiles = @(Get-ChildItem "accessible_lament_map/build" -Recurse -File |
+            Where-Object Name -Match '\s')
+          if ($spacedFiles.Count -ne 0) {
+            throw "Generated Mudlet files must not contain whitespace: $($spacedFiles.FullName -join ', ')"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: accessible-lament-map
-          path: accessible_lament_map/build/Accessible Lament Map.mpackage
+          path: accessible_lament_map/build/Accessible-Lament-Map.mpackage
           if-no-files-found: error
 
   portable-zip:
@@ -68,9 +73,9 @@ jobs:
       - name: Assemble portable ZIP
         shell: pwsh
         run: |
-          $package = Get-ChildItem mudlet-package -Recurse -Filter *.mpackage | Select-Object -First 1
-          if (-not $package) { throw "Downloaded Mudlet package was not found" }
-          ./scripts/package-release.ps1 -MudletPackage $package.FullName
+          $package = "mudlet-package/Accessible-Lament-Map.mpackage"
+          if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Downloaded Mudlet package was not found: $package" }
+          ./scripts/package-release.ps1 -MudletPackage $package
       - uses: actions/upload-artifact@v4
         with:
           name: LamentMapper-windows-x64
@@ -81,10 +86,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $package = Get-ChildItem mudlet-package -Recurse -Filter *.mpackage | Select-Object -First 1
-          if (-not $package) { throw "Downloaded Mudlet package was not found" }
+          $package = "mudlet-package/Accessible-Lament-Map.mpackage"
+          if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Downloaded Mudlet package was not found: $package" }
           $assets = @(
             "dist/LamentMapper-windows-x64.zip"
-            $package.FullName
+            $package
           )
           gh release create $env:GITHUB_REF_NAME @assets --generate-notes --verify-tag

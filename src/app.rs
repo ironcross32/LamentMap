@@ -134,6 +134,12 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             log::warn!("repaired invalid configuration; backup is {}", backup.display());
         }
     }
+    let feedback_mode = match config.feedback.mode {
+        FeedbackMode::Speech => "speech",
+        FeedbackMode::SpeechAndSounds => "speech_and_sounds",
+        FeedbackMode::Sounds => "sounds",
+    };
+    log::info!("loaded feedback mode: {feedback_mode}");
 
     wxdragon::main(move |app| {
         let Some(checker) = SingleInstanceChecker::new("LamentMapper.bscross32.v1", None) else {

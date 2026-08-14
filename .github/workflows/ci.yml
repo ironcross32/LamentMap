@@ -1,6 +1,6 @@
 name: CI
 
-on: [push, pull_request]
+on: pull_request
 
 permissions:
   contents: read
@@ -73,10 +73,15 @@ jobs:
       - name: Verify expected package and embedded handlers
         shell: pwsh
         run: |
-          $package = "accessible_lament_map/build/Accessible Lament Map.mpackage"
-          $xmlPath = "accessible_lament_map/build/Accessible Lament Map.xml"
+          $package = "accessible_lament_map/build/Accessible-Lament-Map.mpackage"
+          $xmlPath = "accessible_lament_map/build/Accessible-Lament-Map.xml"
           if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Expected package was not produced: $package" }
           if (-not (Test-Path -LiteralPath $xmlPath -PathType Leaf)) { throw "Expected package XML was not produced: $xmlPath" }
+          $spacedFiles = @(Get-ChildItem "accessible_lament_map/build" -Recurse -File |
+            Where-Object Name -Match '\s')
+          if ($spacedFiles.Count -ne 0) {
+            throw "Generated Mudlet files must not contain whitespace: $($spacedFiles.FullName -join ', ')"
+          }
 
           [xml]$xml = Get-Content -Raw -LiteralPath $xmlPath
           $required = @(
@@ -95,6 +100,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: accessible-lament-map
-          path: accessible_lament_map/build/Accessible Lament Map.mpackage
+          path: accessible_lament_map/build/Accessible-Lament-Map.mpackage
           if-no-files-found: error
           retention-days: 7

@@ -44,14 +44,63 @@ local function equal(actual, expected, label)
 end
 
 equal(lamentMapper.packageVersion, "1.1.0", "package diagnostic version")
+equal(lamentMapper.packageName, "Accessible-Lament-Map", "canonical package name")
 equal(handlerNumber, 8, "registered lifecycle and setup handlers")
 equal(type(handlers.sysInstallPackage), "function", "install handler")
 equal(type(handlers.sysDownloadDone), "function", "download completion handler")
 equal(type(handlers.sysDownloadError), "function", "download error handler")
 equal(type(handlers.sysUnzipDone), "function", "unzip completion handler")
 equal(type(handlers.sysUnzipError), "function", "unzip error handler")
-handlers.sysInstallPackage("sysInstallPackage", "Accessible Lament Map")
+handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
 handlers.sysBufferShrinkEvent("sysBufferShrinkEvent", "main")
+
+do
+  local originalOpen = io.open
+  local opened = {}
+  local saved = nil
+
+  equal(
+    lamentMapper.profilePath(),
+    "./accessible-lament-map-executable.txt",
+    "package-scoped executable path file"
+  )
+  equal(lamentMapper.legacyProfilePath(), "./lamentmapper-executable.txt", "legacy path file")
+
+  io.open = function(path, mode)
+    opened[#opened + 1] = path
+    if path == lamentMapper.profilePath() and mode == "rb" then
+      return {
+        read = function(_)
+          return [[C:\Existing Install\LamentMapper.exe]]
+        end,
+        close = function(_) end,
+      }
+    end
+    if path == [[C:/Existing Install/LamentMapper.exe]] and mode == "rb" then
+      return { close = function(_) end }
+    end
+    if path == lamentMapper.profilePath() and mode == "wb" then
+      return {
+        write = function(_, pathValue, newline)
+          saved = pathValue .. newline
+        end,
+        close = function(_) end,
+      }
+    end
+    return nil, "unexpected path"
+  end
+
+  local loadedPath, loadedState = lamentMapper.readExecutablePath()
+  equal(loadedPath, [[C:/Existing Install/LamentMapper.exe]], "legacy separators accepted from new state file")
+  equal(loadedState, "usable", "canonicalized saved path is usable")
+  equal(lamentMapper.saveExecutablePath([[D:\Mapper\LamentMapper.exe]]), true, "backslash path saves")
+  equal(saved, "D:/Mapper/LamentMapper.exe\n", "saved executable uses forward slashes")
+  for _, openedPath in ipairs(opened) do
+    equal(openedPath ~= lamentMapper.legacyProfilePath(), true, "legacy state file is never imported")
+  end
+
+  io.open = originalOpen
+end
 
 do
   local closed = false
@@ -99,8 +148,8 @@ do
 
   equal(lamentMapper.setup(), true, "bare setup retains manual behavior")
   equal(lamentMapper.setup("manual"), true, "explicit manual setup behavior")
-  equal(saved[1], selections[1], "bare setup saved path")
-  equal(saved[2], selections[2], "manual setup saved path")
+  equal(saved[1], [[C:/Bare/LamentMapper.exe]], "bare setup saves a canonical path")
+  equal(saved[2], [[C:/Manual/LamentMapper.exe]], "manual setup saves a canonical path")
   equal(closeCount, 2, "manual setup closes managed process")
 
   invokeFileDialog = originalInvokeFileDialog
@@ -146,7 +195,7 @@ do
     if mode == "rb" then
       return nil
     end
-    if path:find([[C:\Unavailable\]], 1, true) == 1 then
+    if path:find([[C:/Unavailable/]], 1, true) == 1 then
       return nil, "simulated access denied"
     end
     return {
@@ -159,7 +208,7 @@ do
   end
 
   local archivePath = lamentMapper.createTemporaryArchive()
-  equal(archivePath:find([[.\lamentmapper-]], 1, true), 1, "profile directory temporary fallback")
+  equal(archivePath:find([[./lamentmapper-]], 1, true), 1, "profile directory temporary fallback")
   equal(removedPath, archivePath, "temporary probe removed")
 
   os.getenv = originalGetenv
@@ -220,8 +269,9 @@ do
   local originalIsReadableFile = lamentMapper.isReadableFile
   local originalSaveExecutablePath = lamentMapper.saveExecutablePath
   local originalRemove = os.remove
-  local archivePath = [[C:\Temp\lamentmapper-success.zip]]
-  local destinationPath = [[C:\Apps\LamentMapper]]
+  local archivePath = [[C:/Temp/lamentmapper-success.zip]]
+  local parentPath = [[C:\Apps]]
+  local destinationPath = [[C:/Apps/LamentMapper]]
   local downloadedPath = nil
   local downloadedUrl = nil
   local unzipArchive = nil
@@ -236,7 +286,7 @@ do
   end
   invokeFileDialog = function(fileOrFolder, _)
     equal(fileOrFolder, false, "automatic setup opens a folder picker")
-    return destinationPath
+    return parentPath
   end
   lamentMapper.createTemporaryArchive = function()
     return archivePath
@@ -271,29 +321,44 @@ do
   equal(lamentMapper.setup("auto"), true, "automatic setup starts")
   equal(downloadedPath, archivePath, "download target path")
   equal(downloadedUrl, lamentMapper.releaseUrl, "stable latest release URL")
+  equal(lamentMapper.setupOperation.destinationPath, destinationPath, "selected parent receives LamentMapper child")
   equal(savedPath, nil, "path not saved before validation")
 
-  handlers.sysDownloadDone("sysDownloadDone", [[C:\Temp\unrelated.zip]])
+  handlers.sysDownloadDone("sysDownloadDone", [[c:\temp\unrelated.zip]])
   equal(unzipArchive, nil, "unrelated download completion ignored")
-  handlers.sysDownloadDone("sysDownloadDone", archivePath)
+  handlers.sysDownloadDone("sysDownloadDone", [[c:\TEMP\LAMENTMAPPER-SUCCESS.ZIP\]])
   equal(closeCount, 1, "managed process closed before extraction")
   equal(unzipArchive, archivePath, "unzip archive path")
   equal(unzipDestination, destinationPath, "unzip destination path")
 
-  handlers.sysUnzipDone("sysUnzipDone", archivePath, [[C:\Other]])
+  handlers.sysUnzipDone("sysUnzipDone", archivePath, [[C:\Other\]])
   equal(savedPath, nil, "unrelated unzip destination ignored")
-  handlers.sysUnzipDone("sysUnzipDone", archivePath, destinationPath)
+  handlers.sysUnzipDone(
+    "sysUnzipDone",
+    [[c:\temp\LAMENTMAPPER-success.zip]],
+    [[c:\APPS\lamentmapper\]]
+  )
 
-  local expectedExecutable = destinationPath .. [[\LamentMapper.exe]]
+  local expectedExecutable = destinationPath .. [[/LamentMapper.exe]]
   equal(#readablePaths, 4, "all runtime files validated")
   for index, filename in ipairs(lamentMapper.requiredRuntimeFiles) do
-    equal(readablePaths[index], destinationPath .. [[\]] .. filename, "validated runtime file " .. filename)
+    equal(readablePaths[index], destinationPath .. [[/]] .. filename, "validated runtime file " .. filename)
   end
   equal(savedPath, expectedExecutable, "inferred executable path saved after validation")
   equal(lamentMapper.executablePath, expectedExecutable, "automatic setup configured executable")
   equal(lamentMapper.warnedMissing, false, "automatic setup clears missing warning")
   equal(lamentMapper.setupOperation, nil, "successful setup clears operation")
   equal(removedPath, archivePath, "successful setup removes temporary archive")
+  equal(
+    echoed[#echoed - 1],
+    "<green>LamentMapper extraction and setup are complete: " .. expectedExecutable .. "\n",
+    "automatic setup announces extraction completion"
+  )
+  equal(
+    echoed[#echoed],
+    "<green>You can start using LamentMapper now. It will open automatically when Mudlet receives the next valid ASCII wilderness grid.\n",
+    "automatic setup announces readiness"
+  )
 
   getOS = originalGetOS
   downloadFile = originalDownloadFile
@@ -507,6 +572,7 @@ do
   local originalSpawn = spawn
   local originalProcess = lamentMapper.process
   local originalPath = lamentMapper.executablePath
+  local originalValidateExecutablePath = lamentMapper.validateExecutablePath
   local spawnCount = 0
   local spawnedPath = nil
   local sentPayload = nil
@@ -527,6 +593,9 @@ do
   end
   lamentMapper.process = nil
   lamentMapper.executablePath = [[C:\Configured\LamentMapper.exe]]
+  lamentMapper.validateExecutablePath = function(_)
+    return true
+  end
 
   equal(lamentMapper.sendMap(validThree(), {}), true, "valid map launches configured executable")
   equal(spawnCount, 1, "valid map launch count")
@@ -537,6 +606,67 @@ do
   spawn = originalSpawn
   lamentMapper.process = originalProcess
   lamentMapper.executablePath = originalPath
+  lamentMapper.validateExecutablePath = originalValidateExecutablePath
+end
+
+do
+  local originalOpen = io.open
+  local originalPath = lamentMapper.executablePath
+  local originalProcess = lamentMapper.process
+  local originalOperation = lamentMapper.setupOperation
+
+  io.open = function(path, mode)
+    if path == [[C:/Valid/LamentMapper.exe]] and mode == "rb" then
+      return { close = function(_) end }
+    end
+    if mode == "rb" then
+      return nil, "simulated missing or unreadable file"
+    end
+    return originalOpen(path, mode)
+  end
+  lamentMapper.process = nil
+  lamentMapper.executablePath = [[C:\Missing Folder\LamentMapper.exe]]
+  lamentMapper.warnedMissing = false
+  equal(lamentMapper.ensureProcess(), false, "missing configured executable is not launched")
+  equal(
+    echoed[#echoed]:find("C:/Missing Folder/LamentMapper.exe", 1, true) ~= nil,
+    true,
+    "missing executable diagnostic includes exact canonical path"
+  )
+  equal(
+    echoed[#echoed]:find("simulated missing or unreadable file", 1, true) ~= nil,
+    true,
+    "missing executable diagnostic includes the read failure"
+  )
+
+  lamentMapper.setupOperation = { stage = "extracting" }
+  local statusStart = #echoed
+  lamentMapper.status()
+  equal(echoed[statusStart + 2]:find("invalid or unreadable", 1, true) ~= nil, true,
+      "status distinguishes an invalid executable")
+  equal(echoed[statusStart + 3], "<cyan>Automatic setup: extracting\n", "status reports setup stage")
+
+  lamentMapper.executablePath = nil
+  lamentMapper.setupOperation = nil
+  lamentMapper.warnedMissing = false
+  equal(lamentMapper.ensureProcess(), false, "absent executable path is not launched")
+  equal(echoed[#echoed]:find("path is absent", 1, true) ~= nil, true,
+      "absent executable path has a distinct diagnostic")
+  statusStart = #echoed
+  lamentMapper.status()
+  equal(echoed[statusStart + 2]:find("not configured (absent)", 1, true) ~= nil, true,
+      "status distinguishes an absent executable")
+
+  lamentMapper.executablePath = [[C:\Valid\LamentMapper.exe]]
+  statusStart = #echoed
+  lamentMapper.status()
+  equal(echoed[statusStart + 2]:find("C:/Valid/LamentMapper.exe (usable)", 1, true) ~= nil, true,
+      "status distinguishes a usable executable")
+
+  io.open = originalOpen
+  lamentMapper.executablePath = originalPath
+  lamentMapper.process = originalProcess
+  lamentMapper.setupOperation = originalOperation
 end
 
 do
@@ -680,6 +810,8 @@ do
   local originalProcess = lamentMapper.process
   local originalPath = lamentMapper.executablePath
   local originalLoadPath = lamentMapper.loadExecutablePath
+  local originalReadExecutablePath = lamentMapper.readExecutablePath
+  local originalValidateExecutablePath = lamentMapper.validateExecutablePath
   local originalIsProcessRunning = lamentMapper.isProcessRunning
   local originalSpawn = spawn
   local spawnCount = 0
@@ -708,9 +840,12 @@ do
     end,
   }
   lamentMapper.executablePath = [[C:\Apps\LamentMapper.exe]]
+  lamentMapper.validateExecutablePath = function(_)
+    return true
+  end
   equal(lamentMapper.focusMapper(), true, "running mapper starts focus helper")
   equal(spawnCount, 1, "focus helper spawn count")
-  equal(spawnedPath, [[C:\Apps\LamentMapper.exe]], "focus helper executable")
+  equal(spawnedPath, [[C:/Apps/LamentMapper.exe]], "focus helper executable")
   equal(spawnedArgument, "--focus-existing", "focus helper argument")
   callback("OK: LamentMapper window focused.\n")
   equal(echoed[#echoed], "<green>LamentMapper window focused.\n", "focus helper success output")
@@ -738,14 +873,14 @@ do
     end,
   }
   lamentMapper.executablePath = nil
-  lamentMapper.loadExecutablePath = function()
-    return nil
+  lamentMapper.readExecutablePath = function()
+    return nil, "absent", "not found"
   end
   equal(lamentMapper.focusMapper(), false, "missing focus helper configuration")
   equal(spawnCount, 1, "missing configuration does not spawn helper")
   equal(
     echoed[#echoed],
-    "<yellow>LamentMapper is not configured. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n",
+    "<yellow>LamentMapper executable path is absent. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n",
     "missing configuration diagnostic"
   )
 
@@ -765,6 +900,8 @@ do
   lamentMapper.process = originalProcess
   lamentMapper.executablePath = originalPath
   lamentMapper.loadExecutablePath = originalLoadPath
+  lamentMapper.readExecutablePath = originalReadExecutablePath
+  lamentMapper.validateExecutablePath = originalValidateExecutablePath
   lamentMapper.isProcessRunning = originalIsProcessRunning
   spawn = originalSpawn
 end
@@ -781,14 +918,133 @@ do
     return true
   end
   handlers.sysExitEvent("sysExitEvent")
-  equal(removedPath, [[C:\Temp\lamentmapper-exit.zip]], "profile exit removes temporary archive")
+  equal(removedPath, [[C:/Temp/lamentmapper-exit.zip]], "profile exit removes canonical temporary archive")
   os.remove = originalRemove
 end
 equal(#lamentMapper.eventHandlers, 0, "profile exit handler cleanup")
 
 lamentMapper.initialize()
 equal(#lamentMapper.eventHandlers, 8, "handlers restored after reinitialization")
-handlers.sysUninstallPackage("sysUninstallPackage", "Accessible Lament Map")
-equal(#lamentMapper.eventHandlers, 0, "uninstall handler cleanup")
+
+do
+  local oldTable = lamentMapper
+  local originalRemove = os.remove
+  local originalKill = killAnonymousEventHandler
+  local processClosed = false
+  local helperClosed = false
+  local removed = {}
+  local killed = {}
+
+  oldTable.process = { close = function() processClosed = true end }
+  oldTable.focusHelper = { close = function() helperClosed = true end }
+  oldTable.setupOperation = {
+    archivePath = [[C:\Temp\stale-setup.zip]],
+    stage = "extracting",
+  }
+  oldTable.sequence = 99
+  oldTable.promptCount = 88
+  os.remove = function(path)
+    removed[#removed + 1] = path
+    return true
+  end
+  killAnonymousEventHandler = function(handlerId)
+    killed[#killed + 1] = handlerId
+  end
+
+  dofile("accessible_lament_map/src/scripts/Accessible Lament Map/LamentMapper.lua")
+  equal(lamentMapper ~= oldTable, true, "script reload creates a fresh global table")
+  equal(processClosed, true, "script reload closes the old managed process")
+  equal(helperClosed, true, "script reload closes the old focus helper")
+  equal(removed[1], [[C:/Temp/stale-setup.zip]], "script reload removes stale setup archive")
+  equal(removed[2], "./lamentmapper-executable.txt", "initialization removes legacy path file")
+  equal(#killed, 8, "script reload unregisters every old anonymous handler")
+  equal(lamentMapper.setupOperation, nil, "script reload discards stale setup state")
+  equal(lamentMapper.sequence, 0, "script reload resets transport sequence")
+  equal(lamentMapper.promptCount, 0, "script reload resets diagnostics")
+  equal(#lamentMapper.eventHandlers, 8, "fresh table registers its own handlers")
+
+  os.remove = originalRemove
+  killAnonymousEventHandler = originalKill
+end
+
+do
+  local originalGetPackages = getPackages
+  local originalUninstallPackage = uninstallPackage
+  local originalRemove = os.remove
+  local packages = { "Accessible Lament Map", "Accessible-Lament-Map" }
+  local uninstalled = nil
+  local removed = {}
+
+  getPackages = function()
+    return packages
+  end
+  uninstallPackage = function(packageName)
+    uninstalled = packageName
+    handlers.sysUninstallPackage("sysUninstallPackage", packageName)
+    packages = { "Accessible-Lament-Map" }
+    return true
+  end
+  os.remove = function(path)
+    removed[#removed + 1] = path
+    return true
+  end
+  lamentMapper.executablePath = [[C:/Obsolete/LamentMapper.exe]]
+
+  handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
+  equal(uninstalled, "Accessible Lament Map", "hyphenated install removes legacy package")
+  equal(type(lamentMapper), "table", "legacy uninstall event leaves new package active")
+  equal(lamentMapper.executablePath, nil, "migration discards obsolete executable path")
+  equal(removed[1], "./accessible-lament-map-executable.txt", "migration deletes new path state")
+  equal(removed[2], "./lamentmapper-executable.txt", "migration deletes legacy path state")
+  equal(echoed[#echoed]:find("fresh setup", 1, true) ~= nil, true,
+      "migration requires one fresh setup")
+
+  packages = { "Accessible Lament Map", "Accessible-Lament-Map" }
+  uninstallPackage = function(_)
+    return false
+  end
+  handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
+  equal(echoed[#echoed - 3]:find("could not remove the legacy package", 1, true) ~= nil, true,
+      "failed legacy removal emits a clear warning")
+
+  getPackages = originalGetPackages
+  uninstallPackage = originalUninstallPackage
+  os.remove = originalRemove
+end
+
+do
+  local originalRemove = os.remove
+  local originalKill = killAnonymousEventHandler
+  local processClosed = false
+  local helperClosed = false
+  local removed = {}
+  local killed = {}
+
+  lamentMapper.process = { close = function() processClosed = true end }
+  lamentMapper.focusHelper = { close = function() helperClosed = true end }
+  lamentMapper.setupOperation = {
+    archivePath = [[C:\Temp\uninstall-setup.zip]],
+    stage = "downloading",
+  }
+  os.remove = function(path)
+    removed[path] = true
+    return true
+  end
+  killAnonymousEventHandler = function(handlerId)
+    killed[#killed + 1] = handlerId
+  end
+
+  handlers.sysUninstallPackage("sysUninstallPackage", "Accessible-Lament-Map")
+  equal(processClosed, true, "uninstall closes the managed process")
+  equal(helperClosed, true, "uninstall closes the focus helper")
+  equal(#killed, 8, "uninstall unregisters every anonymous handler")
+  equal(removed["C:/Temp/uninstall-setup.zip"], true, "uninstall removes setup archive")
+  equal(removed["./accessible-lament-map-executable.txt"], true, "uninstall deletes new path file")
+  equal(removed["./lamentmapper-executable.txt"], true, "uninstall deletes legacy path file")
+  equal(lamentMapper, nil, "uninstall clears the global table")
+
+  os.remove = originalRemove
+  killAnonymousEventHandler = originalKill
+end
 
 print("Mudlet capture tests passed")

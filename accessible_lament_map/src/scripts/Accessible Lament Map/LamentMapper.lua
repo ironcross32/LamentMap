@@ -1,22 +1,46 @@
 -- LamentMapper Mudlet transport. All package state and functions live here.
-lamentMapper = lamentMapper or {}
+local previousLamentMapper = rawget(_G, "lamentMapper")
+if type(previousLamentMapper) == "table" then
+  local function closePreviousResource(resource)
+    if resource then
+      pcall(function()
+        resource.close()
+      end)
+    end
+  end
+  closePreviousResource(previousLamentMapper.process)
+  closePreviousResource(previousLamentMapper.focusHelper)
+  local previousOperation = previousLamentMapper.setupOperation
+  if type(previousOperation) == "table" and previousOperation.archivePath then
+    pcall(os.remove, tostring(previousOperation.archivePath):gsub("\\", "/"))
+  end
+  if type(previousLamentMapper.eventHandlers) == "table" then
+    for _, handlerId in ipairs(previousLamentMapper.eventHandlers) do
+      pcall(killAnonymousEventHandler, handlerId)
+    end
+  end
+end
 
-lamentMapper.packageName = "Accessible Lament Map"
+lamentMapper = {}
+
+lamentMapper.packageName = "Accessible-Lament-Map"
+lamentMapper.legacyPackageName = "Accessible Lament Map"
 lamentMapper.packageVersion = "1.1.0"
 lamentMapper.protocolVersion = 1
 lamentMapper.maxMessageBytes = 1024 * 1024
 lamentMapper.process = nil
 lamentMapper.focusHelper = nil
-lamentMapper.sequence = lamentMapper.sequence or 0
+lamentMapper.sequence = 0
 lamentMapper.responseStart = nil
 lamentMapper.lastObservedLine = nil
-lamentMapper.eventHandlers = lamentMapper.eventHandlers or {}
-lamentMapper.setupOperation = lamentMapper.setupOperation or nil
-lamentMapper.setupSequence = lamentMapper.setupSequence or 0
+lamentMapper.eventHandlers = {}
+lamentMapper.setupOperation = nil
+lamentMapper.setupSequence = 0
+lamentMapper.legacyRemovalInProgress = false
 lamentMapper.warnedMissing = false
-lamentMapper.promptCount = lamentMapper.promptCount or 0
-lamentMapper.mapsSent = lamentMapper.mapsSent or 0
-lamentMapper.lastCaptureStatus = lamentMapper.lastCaptureStatus or "Waiting for a prompt boundary"
+lamentMapper.promptCount = 0
+lamentMapper.mapsSent = 0
+lamentMapper.lastCaptureStatus = "Waiting for a prompt boundary"
 lamentMapper.warnedSurveyWithoutMap = false
 lamentMapper.landmarkRemainders = {
   ["^"] = true,
@@ -66,52 +90,121 @@ lamentMapper.validTokens = {
   ["@@"] = true,
 }
 
-function lamentMapper.profilePath()
-  return getMudletHomeDir() .. "/lamentmapper-executable.txt"
-end
-
 function lamentMapper.trim(value)
   return (value:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-function lamentMapper.normalizeExecutablePath(path)
+function lamentMapper.normalizePath(path)
   if type(path) ~= "string" then
     return nil
   end
-  path = lamentMapper.trim(path):gsub('^"', ""):gsub('"$', ""):gsub("/", "\\")
+  path = lamentMapper.trim(path):gsub('^"', ""):gsub('"$', ""):gsub("\\", "/")
   if path == "" then
     return nil
   end
   return path
 end
 
-function lamentMapper.isExecutablePath(path)
-  path = lamentMapper.normalizeExecutablePath(path)
-  if not path or not path:lower():match("\\lamentmapper%.exe$") then
-    return false
+function lamentMapper.joinPath(directory, name)
+  directory = lamentMapper.normalizePath(tostring(directory or "")) or ""
+  directory = directory:gsub("/+$", "")
+  return directory .. "/" .. tostring(name or ""):gsub("^/+", "")
+end
+
+function lamentMapper.profilePath()
+  return lamentMapper.joinPath(getMudletHomeDir(), "accessible-lament-map-executable.txt")
+end
+
+function lamentMapper.legacyProfilePath()
+  return lamentMapper.joinPath(getMudletHomeDir(), "lamentmapper-executable.txt")
+end
+
+function lamentMapper.pathComparisonKey(path)
+  path = lamentMapper.normalizePath(path)
+  if not path then
+    return nil
   end
-  local handle = io.open(path, "rb")
+  if not path:match("^%a:/$") and path ~= "/" and not path:match("^//[^/]+/[^/]+/$") then
+    path = path:gsub("/+$", "")
+  end
+  return path:lower()
+end
+
+function lamentMapper.samePath(left, right)
+  local leftKey = lamentMapper.pathComparisonKey(left)
+  local rightKey = lamentMapper.pathComparisonKey(right)
+  return leftKey ~= nil and leftKey == rightKey
+end
+
+function lamentMapper.normalizeExecutablePath(path)
+  return lamentMapper.normalizePath(path)
+end
+
+function lamentMapper.validateExecutablePath(path)
+  path = lamentMapper.normalizeExecutablePath(path)
+  if not path then
+    return false, "the path is empty"
+  end
+  if not path:lower():match("/lamentmapper%.exe$") then
+    return false, "the file name must be LamentMapper.exe"
+  end
+  local handle, reason = io.open(path, "rb")
   if not handle then
-    return false
+    return false, tostring(reason or "the file is missing or unreadable")
   end
   handle:close()
   return true
 end
 
-function lamentMapper.loadExecutablePath()
-  local handle = io.open(lamentMapper.profilePath(), "rb")
+function lamentMapper.isExecutablePath(path)
+  return lamentMapper.validateExecutablePath(path)
+end
+
+function lamentMapper.readExecutablePath()
+  local handle, reason = io.open(lamentMapper.profilePath(), "rb")
   if not handle then
-    return nil
+    return nil, "absent", tostring(reason or "the path file is missing or unreadable")
   end
   local path = lamentMapper.normalizeExecutablePath(handle:read("*a") or "")
   handle:close()
-  if lamentMapper.isExecutablePath(path) then
+  if not path then
+    return nil, "invalid", "the saved path is empty"
+  end
+  local valid, validationReason = lamentMapper.validateExecutablePath(path)
+  if not valid then
+    return path, "invalid", validationReason
+  end
+  return path, "usable"
+end
+
+function lamentMapper.loadExecutablePath()
+  local path, state, reason = lamentMapper.readExecutablePath()
+  if state == "usable" then
     return path
   end
-  return nil
+  return nil, state, reason, path
+end
+
+function lamentMapper.configuredExecutable()
+  local path = lamentMapper.normalizeExecutablePath(lamentMapper.executablePath)
+  if not path then
+    local savedPath, state, reason = lamentMapper.readExecutablePath()
+    lamentMapper.executablePath = savedPath
+    return savedPath, state, reason
+  end
+  lamentMapper.executablePath = path
+  local valid, reason = lamentMapper.validateExecutablePath(path)
+  if not valid then
+    return path, "invalid", reason
+  end
+  return path, "usable"
 end
 
 function lamentMapper.saveExecutablePath(path)
+  path = lamentMapper.normalizeExecutablePath(path)
+  if not path then
+    return false, "the executable path is empty"
+  end
   local handle, reason = io.open(lamentMapper.profilePath(), "wb")
   if not handle then
     return false, reason
@@ -129,15 +222,8 @@ lamentMapper.requiredRuntimeFiles = {
   "README.html",
 }
 
-function lamentMapper.joinWindowsPath(directory, name)
-  directory = lamentMapper.trim(tostring(directory or "")):gsub('^"', ""):gsub('"$', ""):gsub("/", "\\")
-  if directory:sub(-1) == "\\" then
-    return directory .. name
-  end
-  return directory .. "\\" .. name
-end
-
 function lamentMapper.isReadableFile(path)
+  path = lamentMapper.normalizePath(path)
   local handle = io.open(path, "rb")
   if not handle then
     return false
@@ -146,14 +232,19 @@ function lamentMapper.isReadableFile(path)
   return true
 end
 
+function lamentMapper.deletePathFiles()
+  pcall(os.remove, lamentMapper.profilePath())
+  pcall(os.remove, lamentMapper.legacyProfilePath())
+end
+
 function lamentMapper.createTemporaryArchive()
   local directories = {}
   local temporaryDirectory = os.getenv("TEMP")
   if type(temporaryDirectory) == "string" and lamentMapper.trim(temporaryDirectory) ~= "" then
-    directories[#directories + 1] = temporaryDirectory
+    directories[#directories + 1] = lamentMapper.normalizePath(temporaryDirectory)
   end
-  local profileDirectory = getMudletHomeDir()
-  if #directories == 0 or directories[1] ~= profileDirectory then
+  local profileDirectory = lamentMapper.normalizePath(getMudletHomeDir())
+  if #directories == 0 or not lamentMapper.samePath(directories[1], profileDirectory) then
     directories[#directories + 1] = profileDirectory
   end
 
@@ -163,7 +254,7 @@ function lamentMapper.createTemporaryArchive()
       lamentMapper.setupSequence = lamentMapper.setupSequence + 1
       local filename = "lamentmapper-" .. tostring(os.time()) .. "-"
           .. tostring(lamentMapper.setupSequence) .. ".zip"
-      local path = lamentMapper.joinWindowsPath(directory, filename)
+      local path = lamentMapper.joinPath(directory, filename)
       local existing = io.open(path, "rb")
       if existing then
         existing:close()
@@ -190,7 +281,7 @@ function lamentMapper.clearAutoSetup()
   local operation = lamentMapper.setupOperation
   lamentMapper.setupOperation = nil
   if operation and operation.archivePath then
-    pcall(os.remove, operation.archivePath)
+    pcall(os.remove, lamentMapper.normalizePath(operation.archivePath))
   end
 end
 
@@ -242,12 +333,16 @@ function lamentMapper.setupAuto()
     return false
   end
 
-  local destination = invokeFileDialog(false, "Select the folder where LamentMapper should be installed")
-  if not destination or destination == "" then
+  local parentDirectory = invokeFileDialog(
+    false,
+    "Select the parent folder that should contain the LamentMapper folder"
+  )
+  if not parentDirectory or parentDirectory == "" then
     cecho("<yellow>LamentMapper automatic setup cancelled.\n")
     return false
   end
-  destination = lamentMapper.trim(destination):gsub('^"', ""):gsub('"$', ""):gsub("/", "\\")
+  parentDirectory = lamentMapper.normalizePath(parentDirectory)
+  local destination = lamentMapper.joinPath(parentDirectory, "LamentMapper")
 
   local archivePath, reason = lamentMapper.createTemporaryArchive()
   if not archivePath then
@@ -257,7 +352,7 @@ function lamentMapper.setupAuto()
   lamentMapper.setupOperation = {
     archivePath = archivePath,
     destinationPath = destination,
-    executablePath = lamentMapper.joinWindowsPath(destination, "LamentMapper.exe"),
+    executablePath = lamentMapper.joinPath(destination, "LamentMapper.exe"),
     stage = "downloading",
   }
   cecho("<cyan>Downloading the latest LamentMapper Windows x64 release...\n")
@@ -281,7 +376,8 @@ end
 
 function lamentMapper.onDownloadDone(_, filename)
   local operation = lamentMapper.setupOperation
-  if not operation or operation.stage ~= "downloading" or filename ~= operation.archivePath then
+  if not operation or operation.stage ~= "downloading"
+      or not lamentMapper.samePath(filename, operation.archivePath) then
     return
   end
   operation.stage = "extracting"
@@ -297,7 +393,8 @@ end
 
 function lamentMapper.onDownloadError(_, reason, filename, _)
   local operation = lamentMapper.setupOperation
-  if not operation or operation.stage ~= "downloading" or filename ~= operation.archivePath then
+  if not operation or operation.stage ~= "downloading"
+      or not lamentMapper.samePath(filename, operation.archivePath) then
     return
   end
   lamentMapper.failAutoSetup("download", reason)
@@ -306,13 +403,14 @@ end
 function lamentMapper.onUnzipDone(_, archivePath, destinationPath)
   local operation = lamentMapper.setupOperation
   if not operation or operation.stage ~= "extracting"
-      or archivePath ~= operation.archivePath or destinationPath ~= operation.destinationPath then
+      or not lamentMapper.samePath(archivePath, operation.archivePath)
+      or not lamentMapper.samePath(destinationPath, operation.destinationPath) then
     return
   end
 
   local missing = {}
   for _, filename in ipairs(lamentMapper.requiredRuntimeFiles) do
-    local path = lamentMapper.joinWindowsPath(operation.destinationPath, filename)
+    local path = lamentMapper.joinPath(operation.destinationPath, filename)
     if not lamentMapper.isReadableFile(path) then
       missing[#missing + 1] = filename
     end
@@ -331,14 +429,15 @@ function lamentMapper.onUnzipDone(_, archivePath, destinationPath)
   lamentMapper.executablePath = executablePath
   lamentMapper.warnedMissing = false
   lamentMapper.clearAutoSetup()
-  cecho("<green>LamentMapper installed and configured: " .. executablePath .. "\n")
-  cecho("<cyan>LamentMapper will start when Mudlet receives the next valid ASCII wilderness grid.\n")
+  cecho("<green>LamentMapper extraction and setup are complete: " .. executablePath .. "\n")
+  cecho("<green>You can start using LamentMapper now. It will open automatically when Mudlet receives the next valid ASCII wilderness grid.\n")
 end
 
 function lamentMapper.onUnzipError(_, archivePath, destinationPath)
   local operation = lamentMapper.setupOperation
   if not operation or operation.stage ~= "extracting"
-      or archivePath ~= operation.archivePath or destinationPath ~= operation.destinationPath then
+      or not lamentMapper.samePath(archivePath, operation.archivePath)
+      or not lamentMapper.samePath(destinationPath, operation.destinationPath) then
     return
   end
   lamentMapper.failAutoSetup("extraction", "Mudlet reported that ZIP extraction failed")
@@ -388,17 +487,27 @@ function lamentMapper.onFocusHelperOutput(output)
   end
 end
 
+function lamentMapper.reportExecutableProblem(path, state, reason)
+  if state == "invalid" and path then
+    cecho("<red>Configured LamentMapper executable is invalid or unreadable: " .. path
+        .. " (" .. tostring(reason or "unknown reason") .. "). Run: lamentmapper setup auto"
+        .. " (or 'lamentmapper setup manual' for an existing installation).\n")
+  else
+    cecho("<yellow>LamentMapper executable path is absent. Run: lamentmapper setup auto"
+        .. " (or 'lamentmapper setup manual' for an existing installation).\n")
+  end
+end
+
 function lamentMapper.focusMapper()
   if not lamentMapper.isProcessRunning() then
     cecho("<yellow>No LamentMapper window is available; the managed mapper is not running.\n")
     return false
   end
-  local path = lamentMapper.executablePath or lamentMapper.loadExecutablePath()
-  if not path then
-    cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n")
+  local path, pathState, reason = lamentMapper.configuredExecutable()
+  if pathState ~= "usable" then
+    lamentMapper.reportExecutableProblem(path, pathState, reason)
     return false
   end
-  lamentMapper.executablePath = path
   local ok, helperOrReason = pcall(function()
     return spawn(lamentMapper.onFocusHelperOutput, path, "--focus-existing")
   end)
@@ -411,16 +520,24 @@ function lamentMapper.focusMapper()
 end
 
 function lamentMapper.status()
-  local path = lamentMapper.executablePath or lamentMapper.loadExecutablePath()
-  local configured = path or "not configured"
-  local state = lamentMapper.isProcessRunning() and "running" or "not running"
+  local path, pathState, reason = lamentMapper.configuredExecutable()
+  local configured = "not configured (absent)"
+  if pathState == "usable" then
+    configured = path .. " (usable)"
+  elseif pathState == "invalid" then
+    configured = tostring(path or "not configured") .. " (invalid or unreadable: "
+        .. tostring(reason or "unknown reason") .. ")"
+  end
+  local processState = lamentMapper.isProcessRunning() and "running" or "not running"
+  local setupStage = lamentMapper.setupOperation and lamentMapper.setupOperation.stage or "not active"
   cecho("<cyan>Accessible Lament Map package: " .. lamentMapper.packageVersion .. "\n")
   cecho("<cyan>LamentMapper path: " .. configured .. "\n")
-  cecho("<cyan>LamentMapper managed process: " .. state .. "\n")
+  cecho("<cyan>Automatic setup: " .. setupStage .. "\n")
+  cecho("<cyan>LamentMapper managed process: " .. processState .. "\n")
   cecho("<cyan>Prompt boundaries observed: " .. tostring(lamentMapper.promptCount) .. "\n")
   cecho("<cyan>Maps transmitted: " .. tostring(lamentMapper.mapsSent) .. "\n")
   cecho("<cyan>Last capture result: " .. tostring(lamentMapper.lastCaptureStatus) .. "\n")
-  if path and state ~= "running" then
+  if pathState == "usable" and processState ~= "running" then
     cecho("<yellow>Close any manually launched LamentMapper window. Mudlet must launch the application to provide its map stream.\n")
   end
 end
@@ -430,15 +547,15 @@ function lamentMapper.ensureProcess()
     return true
   end
   lamentMapper.process = nil
-  local path = lamentMapper.executablePath or lamentMapper.loadExecutablePath()
-  if not path then
+  local path, pathState, reason = lamentMapper.configuredExecutable()
+  if pathState ~= "usable" then
     if not lamentMapper.warnedMissing then
-      cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n")
+      lamentMapper.reportExecutableProblem(path, pathState, reason)
       lamentMapper.warnedMissing = true
     end
     return false
   end
-  lamentMapper.executablePath = path
+  lamentMapper.warnedMissing = false
   local ok, processOrReason = pcall(function()
     return spawn(function(_) end, path)
   end)
@@ -744,11 +861,61 @@ function lamentMapper.onBufferShrink(_, consoleName)
   end
 end
 
+function lamentMapper.isPackageInstalled(packageName)
+  if type(getPackages) ~= "function" then
+    return false
+  end
+  local ok, packages = pcall(getPackages)
+  if not ok or type(packages) ~= "table" then
+    return false
+  end
+  for key, value in pairs(packages) do
+    if key == packageName or value == packageName then
+      return true
+    end
+  end
+  return false
+end
+
+function lamentMapper.removeLegacyPackage()
+  if not lamentMapper.isPackageInstalled(lamentMapper.legacyPackageName) then
+    return false
+  end
+
+  lamentMapper.deletePathFiles()
+  lamentMapper.executablePath = nil
+  lamentMapper.warnedMissing = false
+  lamentMapper.legacyRemovalInProgress = true
+  if type(uninstallPackage) ~= "function" then
+    lamentMapper.legacyRemovalInProgress = false
+    cecho("<red>Accessible Lament Map migration could not remove the legacy package because "
+        .. "uninstallPackage is unavailable. Remove '" .. lamentMapper.legacyPackageName
+        .. "' manually, then reinstall '" .. lamentMapper.packageName .. "'.\n")
+    return true
+  end
+
+  local ok, result = pcall(uninstallPackage, lamentMapper.legacyPackageName)
+  if not ok or result == false or lamentMapper.isPackageInstalled(lamentMapper.legacyPackageName) then
+    lamentMapper.legacyRemovalInProgress = false
+    cecho("<red>Accessible Lament Map migration could not remove the legacy package '"
+        .. lamentMapper.legacyPackageName .. "': " .. tostring(result)
+        .. ". Remove it manually; the new package remains installed.\n")
+    return true
+  end
+  lamentMapper.legacyRemovalInProgress = false
+  cecho("<green>Removed the legacy '" .. lamentMapper.legacyPackageName .. "' package.\n")
+  return true
+end
+
 function lamentMapper.onInstall(_, packageName)
   if packageName == lamentMapper.packageName then
     lamentMapper.resetCapture()
+    local migrated = lamentMapper.removeLegacyPackage()
     cecho("<green>Accessible Lament Map installed. Run: lamentmapper setup auto\n")
     cecho("<cyan>For an existing extracted copy, run: lamentmapper setup manual\n")
+    if migrated then
+      cecho("<yellow>The legacy installation path was discarded. Complete one fresh setup before using the mapper.\n")
+    end
   end
 end
 
@@ -767,8 +934,15 @@ function lamentMapper.cleanup()
 end
 
 function lamentMapper.onUninstall(_, packageName)
+  if packageName == lamentMapper.legacyPackageName then
+    lamentMapper.legacyRemovalInProgress = false
+    return
+  end
   if packageName == lamentMapper.packageName then
-    lamentMapper.cleanup()
+    local mapper = lamentMapper
+    mapper.cleanup()
+    mapper.deletePathFiles()
+    _G.lamentMapper = nil
   end
 end
 
@@ -789,7 +963,9 @@ end
 function lamentMapper.initialize()
   lamentMapper.clearAutoSetup()
   lamentMapper.unregisterHandlers()
-  lamentMapper.executablePath = lamentMapper.loadExecutablePath()
+  pcall(os.remove, lamentMapper.legacyProfilePath())
+  local path = lamentMapper.readExecutablePath()
+  lamentMapper.executablePath = path
   lamentMapper.registerHandler("sysInstallPackage", "lamentMapper.onInstall")
   lamentMapper.registerHandler("sysUninstallPackage", "lamentMapper.onUninstall")
   lamentMapper.registerHandler("sysExitEvent", "lamentMapper.onExit")

@@ -3,20 +3,29 @@
 This Mudlet package detects complete Lament wilderness maps between real prompt
 events and sends them to `LamentMapper.exe` over standard input.
 
-After importing the generated `.mpackage`, run `lamentmapper setup auto` and
-select the folder where LamentMapper should be installed. Automatic setup requires
-Windows x64 and Mudlet 4.6 or newer. It downloads the latest Windows x64 release,
-extracts it into the selected folder, validates its runtime files, and saves the
-inferred executable path.
+After importing the generated `Accessible-Lament-Map.mpackage`, run
+`lamentmapper setup auto` and select the parent folder that should contain the
+new `LamentMapper` folder. Automatic setup requires Windows x64 and Mudlet 4.6
+or newer. It downloads the latest Windows x64 release, extracts it into that
+`LamentMapper` subfolder, validates its runtime files, and saves the inferred
+executable path.
 
-Selecting an existing LamentMapper folder performs an in-place update. Files absent
-from the release archive, including `config.toml`, are preserved. For manual
-setup, download and extract the release ZIP, run `lamentmapper setup manual`, and
-select `LamentMapper.exe`. The original `lamentmapper setup` command continues to
-invoke manual setup.
+To update an existing installation in place, select the folder that contains its
+`LamentMapper` folder. Files absent from the release archive, including
+`config.toml`, are preserved. For manual setup, download and extract the release
+ZIP, run `lamentmapper setup manual`, and select `LamentMapper.exe`. The original
+`lamentmapper setup` command continues to invoke manual setup.
 
 Use `lamentmapper status` to inspect the configured path and managed-process
-state.
+state, including an active automatic-setup stage and whether the saved
+executable is absent, invalid, or usable. Installing this hyphenated package
+automatically removes the legacy `Accessible Lament Map` package when found and
+requires one fresh setup. Uninstalling removes both current and legacy saved-path
+files.
+
+Automatic updates extract over the application directory without deleting
+user-owned files, so the existing `config.toml` is preserved. In that file,
+`mode = "speech"` intentionally disables terrain sounds.
 
 Press Ctrl+Space in Mudlet to focus the managed LamentMapper window when it is
 already running. The key reports an unavailable window without launching the mapper.
