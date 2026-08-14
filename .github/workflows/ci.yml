@@ -34,6 +34,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install Lua 5.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes lua5.1
+      - name: Test Mudlet Lua transport and setup
+        run: lua5.1 accessible_lament_map/tests/capture_test.lua
       - name: Check out pinned Muddler 1.1.0 source
         uses: actions/checkout@v4
         with:
@@ -54,6 +60,13 @@ jobs:
           Get-ChildItem accessible_lament_map/src -Recurse -Filter *.json | ForEach-Object {
             Get-Content -Raw $_.FullName | ConvertFrom-Json | Out-Null
           }
+          $aliases = Get-Content -Raw -LiteralPath "accessible_lament_map/src/aliases/Accessible Lament Map/aliases.json" |
+            ConvertFrom-Json
+          $setupAlias = $aliases | Where-Object name -EQ "LamentMapper setup"
+          $expectedSetupRegex = '^lamentmapper\s+setup(?:\s+(manual|auto))?\s*$'
+          if ($null -eq $setupAlias -or $setupAlias.regex -cne $expectedSetupRegex) {
+            throw "LamentMapper setup alias does not accept exactly the optional manual/auto mode"
+          }
       - name: Build Mudlet package
         working-directory: accessible_lament_map
         run: java -jar ../.ci/muddler/build/libs/muddle-1.1.0-all.jar
@@ -68,7 +81,7 @@ jobs:
           [xml]$xml = Get-Content -Raw -LiteralPath $xmlPath
           $required = @(
             @{ XPath = "//Script[name='LamentMapper']/script"; Marker = "lamentMapper.initialize()" },
-            @{ XPath = "//Alias[name='LamentMapper setup']/script"; Marker = "lamentMapper.setup()" },
+            @{ XPath = "//Alias[name='LamentMapper setup']/script"; Marker = "lamentMapper.setup(matches[2])" },
             @{ XPath = "//Alias[name='LamentMapper status']/script"; Marker = "lamentMapper.status()" },
             @{ XPath = "//Trigger[name='LamentMapper prompt boundary']/script"; Marker = "lamentMapper.onPrompt()" },
             @{ XPath = "//Key[name='LamentMapper focus']/script"; Marker = "lamentMapper.focusMapper()" }

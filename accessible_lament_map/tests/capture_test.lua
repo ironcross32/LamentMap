@@ -43,12 +43,15 @@ local function equal(actual, expected, label)
   end
 end
 
-equal(lamentMapper.packageVersion, "1.0.6", "package diagnostic version")
-equal(handlerNumber, 4, "registered lifecycle handlers")
+equal(lamentMapper.packageVersion, "1.1.0", "package diagnostic version")
+equal(handlerNumber, 8, "registered lifecycle and setup handlers")
 equal(type(handlers.sysInstallPackage), "function", "install handler")
+equal(type(handlers.sysDownloadDone), "function", "download completion handler")
+equal(type(handlers.sysDownloadError), "function", "download error handler")
+equal(type(handlers.sysUnzipDone), "function", "unzip completion handler")
+equal(type(handlers.sysUnzipError), "function", "unzip error handler")
 handlers.sysInstallPackage("sysInstallPackage", "Accessible Lament Map")
 handlers.sysBufferShrinkEvent("sysBufferShrinkEvent", "main")
-handlers.sysExitEvent("sysExitEvent")
 
 do
   local closed = false
@@ -63,6 +66,331 @@ do
   equal(lamentMapper.isProcessRunning(), true, "documented process isRunning call")
   lamentMapper.closeProcess()
   equal(closed, true, "documented process close call")
+end
+
+do
+  local originalInvokeFileDialog = invokeFileDialog
+  local originalIsExecutablePath = lamentMapper.isExecutablePath
+  local originalSaveExecutablePath = lamentMapper.saveExecutablePath
+  local originalCloseProcess = lamentMapper.closeProcess
+  local selections = {
+    [[C:\Bare\LamentMapper.exe]],
+    [[C:\Manual\LamentMapper.exe]],
+  }
+  local selectionIndex = 0
+  local saved = {}
+  local closeCount = 0
+
+  invokeFileDialog = function(fileOrFolder, _)
+    equal(fileOrFolder, true, "manual setup opens a file picker")
+    selectionIndex = selectionIndex + 1
+    return selections[selectionIndex]
+  end
+  lamentMapper.isExecutablePath = function(_)
+    return true
+  end
+  lamentMapper.saveExecutablePath = function(path)
+    saved[#saved + 1] = path
+    return true
+  end
+  lamentMapper.closeProcess = function()
+    closeCount = closeCount + 1
+  end
+
+  equal(lamentMapper.setup(), true, "bare setup retains manual behavior")
+  equal(lamentMapper.setup("manual"), true, "explicit manual setup behavior")
+  equal(saved[1], selections[1], "bare setup saved path")
+  equal(saved[2], selections[2], "manual setup saved path")
+  equal(closeCount, 2, "manual setup closes managed process")
+
+  invokeFileDialog = originalInvokeFileDialog
+  lamentMapper.isExecutablePath = originalIsExecutablePath
+  lamentMapper.saveExecutablePath = originalSaveExecutablePath
+  lamentMapper.closeProcess = originalCloseProcess
+end
+
+do
+  local originalSetup = lamentMapper.setup
+  local dispatchedMode = "not called"
+  lamentMapper.setup = function(mode)
+    dispatchedMode = mode
+  end
+
+  matches = { "lamentmapper setup", nil }
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_setup.lua")
+  equal(dispatchedMode, nil, "bare alias dispatches manual default")
+
+  matches = { "lamentmapper setup auto", "auto" }
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_setup.lua")
+  equal(dispatchedMode, "auto", "auto alias dispatch")
+
+  matches = { "lamentmapper setup manual", "manual" }
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_setup.lua")
+  equal(dispatchedMode, "manual", "manual alias dispatch")
+  lamentMapper.setup = originalSetup
+end
+
+do
+  local originalGetenv = os.getenv
+  local originalRemove = os.remove
+  local originalOpen = io.open
+  local removedPath = nil
+
+  os.getenv = function(name)
+    if name == "TEMP" then
+      return [[C:\Unavailable]]
+    end
+    return originalGetenv(name)
+  end
+  io.open = function(path, mode)
+    if mode == "rb" then
+      return nil
+    end
+    if path:find([[C:\Unavailable\]], 1, true) == 1 then
+      return nil, "simulated access denied"
+    end
+    return {
+      close = function() end,
+    }
+  end
+  os.remove = function(path)
+    removedPath = path
+    return true
+  end
+
+  local archivePath = lamentMapper.createTemporaryArchive()
+  equal(archivePath:find([[.\lamentmapper-]], 1, true), 1, "profile directory temporary fallback")
+  equal(removedPath, archivePath, "temporary probe removed")
+
+  os.getenv = originalGetenv
+  os.remove = originalRemove
+  io.open = originalOpen
+end
+
+do
+  local originalGetOS = getOS
+  local originalDownloadFile = downloadFile
+  local originalUnzipAsync = unzipAsync
+  local originalInvokeFileDialog = invokeFileDialog
+  local pickerCalls = 0
+
+  invokeFileDialog = function(_, _)
+    pickerCalls = pickerCalls + 1
+    return ""
+  end
+  getOS = function()
+    return "linux"
+  end
+  downloadFile = function(_, _) end
+  unzipAsync = function(_, _)
+    return true
+  end
+  equal(lamentMapper.setup("auto"), false, "automatic setup rejects non-Windows systems")
+  equal(pickerCalls, 0, "unsupported system does not open picker")
+
+  getOS = function()
+    return "windows"
+  end
+  downloadFile = nil
+  equal(lamentMapper.setup("auto"), false, "automatic setup requires download API")
+  equal(echoed[#echoed - 1]:find("Mudlet 4.6", 1, true) ~= nil, true, "old Mudlet version diagnostic")
+
+  downloadFile = function(_, _) end
+  equal(lamentMapper.setup("auto"), false, "automatic setup handles folder-picker cancellation")
+  equal(pickerCalls, 1, "automatic setup opens folder picker")
+
+  lamentMapper.setupOperation = { stage = "downloading" }
+  equal(lamentMapper.setup("auto"), false, "overlapping automatic setup rejected")
+  equal(pickerCalls, 1, "overlapping setup does not open another picker")
+  lamentMapper.setupOperation = nil
+
+  getOS = originalGetOS
+  downloadFile = originalDownloadFile
+  unzipAsync = originalUnzipAsync
+  invokeFileDialog = originalInvokeFileDialog
+end
+
+do
+  local originalGetOS = getOS
+  local originalDownloadFile = downloadFile
+  local originalUnzipAsync = unzipAsync
+  local originalInvokeFileDialog = invokeFileDialog
+  local originalCreateTemporaryArchive = lamentMapper.createTemporaryArchive
+  local originalCloseProcess = lamentMapper.closeProcess
+  local originalIsReadableFile = lamentMapper.isReadableFile
+  local originalSaveExecutablePath = lamentMapper.saveExecutablePath
+  local originalRemove = os.remove
+  local archivePath = [[C:\Temp\lamentmapper-success.zip]]
+  local destinationPath = [[C:\Apps\LamentMapper]]
+  local downloadedPath = nil
+  local downloadedUrl = nil
+  local unzipArchive = nil
+  local unzipDestination = nil
+  local closeCount = 0
+  local savedPath = nil
+  local removedPath = nil
+  local readablePaths = {}
+
+  getOS = function()
+    return "windows"
+  end
+  invokeFileDialog = function(fileOrFolder, _)
+    equal(fileOrFolder, false, "automatic setup opens a folder picker")
+    return destinationPath
+  end
+  lamentMapper.createTemporaryArchive = function()
+    return archivePath
+  end
+  downloadFile = function(path, url)
+    downloadedPath = path
+    downloadedUrl = url
+  end
+  unzipAsync = function(path, destination)
+    unzipArchive = path
+    unzipDestination = destination
+    return true
+  end
+  lamentMapper.closeProcess = function()
+    closeCount = closeCount + 1
+  end
+  lamentMapper.isReadableFile = function(path)
+    readablePaths[#readablePaths + 1] = path
+    return true
+  end
+  lamentMapper.saveExecutablePath = function(path)
+    savedPath = path
+    return true
+  end
+  os.remove = function(path)
+    removedPath = path
+    return true
+  end
+  lamentMapper.executablePath = [[C:\Existing\LamentMapper.exe]]
+  lamentMapper.warnedMissing = true
+
+  equal(lamentMapper.setup("auto"), true, "automatic setup starts")
+  equal(downloadedPath, archivePath, "download target path")
+  equal(downloadedUrl, lamentMapper.releaseUrl, "stable latest release URL")
+  equal(savedPath, nil, "path not saved before validation")
+
+  handlers.sysDownloadDone("sysDownloadDone", [[C:\Temp\unrelated.zip]])
+  equal(unzipArchive, nil, "unrelated download completion ignored")
+  handlers.sysDownloadDone("sysDownloadDone", archivePath)
+  equal(closeCount, 1, "managed process closed before extraction")
+  equal(unzipArchive, archivePath, "unzip archive path")
+  equal(unzipDestination, destinationPath, "unzip destination path")
+
+  handlers.sysUnzipDone("sysUnzipDone", archivePath, [[C:\Other]])
+  equal(savedPath, nil, "unrelated unzip destination ignored")
+  handlers.sysUnzipDone("sysUnzipDone", archivePath, destinationPath)
+
+  local expectedExecutable = destinationPath .. [[\LamentMapper.exe]]
+  equal(#readablePaths, 4, "all runtime files validated")
+  for index, filename in ipairs(lamentMapper.requiredRuntimeFiles) do
+    equal(readablePaths[index], destinationPath .. [[\]] .. filename, "validated runtime file " .. filename)
+  end
+  equal(savedPath, expectedExecutable, "inferred executable path saved after validation")
+  equal(lamentMapper.executablePath, expectedExecutable, "automatic setup configured executable")
+  equal(lamentMapper.warnedMissing, false, "automatic setup clears missing warning")
+  equal(lamentMapper.setupOperation, nil, "successful setup clears operation")
+  equal(removedPath, archivePath, "successful setup removes temporary archive")
+
+  getOS = originalGetOS
+  downloadFile = originalDownloadFile
+  unzipAsync = originalUnzipAsync
+  invokeFileDialog = originalInvokeFileDialog
+  lamentMapper.createTemporaryArchive = originalCreateTemporaryArchive
+  lamentMapper.closeProcess = originalCloseProcess
+  lamentMapper.isReadableFile = originalIsReadableFile
+  lamentMapper.saveExecutablePath = originalSaveExecutablePath
+  os.remove = originalRemove
+end
+
+do
+  local originalUnzipAsync = unzipAsync
+  local originalCloseProcess = lamentMapper.closeProcess
+  local originalIsReadableFile = lamentMapper.isReadableFile
+  local originalSaveExecutablePath = lamentMapper.saveExecutablePath
+  local originalRemove = os.remove
+  local oldPath = [[C:\Existing\LamentMapper.exe]]
+  local archivePath = [[C:\Temp\lamentmapper-failure.zip]]
+  local destinationPath = [[C:\Apps\LamentMapper]]
+  local saveCount = 0
+  local removed = {}
+
+  os.remove = function(path)
+    removed[#removed + 1] = path
+    return true
+  end
+  lamentMapper.saveExecutablePath = function(_)
+    saveCount = saveCount + 1
+    return true
+  end
+  lamentMapper.closeProcess = function() end
+  lamentMapper.executablePath = oldPath
+
+  lamentMapper.setupOperation = {
+    archivePath = archivePath,
+    destinationPath = destinationPath,
+    executablePath = destinationPath .. [[\LamentMapper.exe]],
+    stage = "downloading",
+  }
+  handlers.sysDownloadError("sysDownloadError", "unrelated failure", [[C:\Temp\other.zip]], "https://example.invalid")
+  equal(lamentMapper.setupOperation.stage, "downloading", "unrelated download error ignored")
+  handlers.sysDownloadError("sysDownloadError", "network unavailable", archivePath, lamentMapper.releaseUrl)
+  equal(lamentMapper.setupOperation, nil, "download failure clears operation")
+  equal(lamentMapper.executablePath, oldPath, "download failure preserves configured path")
+  equal(saveCount, 0, "download failure does not save path")
+  equal(echoed[#echoed]:find("setup manual", 1, true) ~= nil, true, "download failure prints manual recovery")
+
+  lamentMapper.setupOperation = {
+    archivePath = archivePath,
+    destinationPath = destinationPath,
+    executablePath = destinationPath .. [[\LamentMapper.exe]],
+    stage = "downloading",
+  }
+  unzipAsync = function(_, _)
+    return nil, "simulated synchronous rejection"
+  end
+  handlers.sysDownloadDone("sysDownloadDone", archivePath)
+  equal(lamentMapper.setupOperation, nil, "synchronous unzip rejection clears operation")
+  equal(echoed[#echoed - 1]:find("simulated synchronous rejection", 1, true) ~= nil, true,
+      "synchronous unzip rejection diagnostic")
+
+  lamentMapper.setupOperation = {
+    archivePath = archivePath,
+    destinationPath = destinationPath,
+    executablePath = destinationPath .. [[\LamentMapper.exe]],
+    stage = "extracting",
+  }
+  handlers.sysUnzipError("sysUnzipError", [[C:\Temp\other.zip]], destinationPath)
+  equal(lamentMapper.setupOperation.stage, "extracting", "unrelated unzip error ignored")
+  handlers.sysUnzipError("sysUnzipError", archivePath, destinationPath)
+  equal(lamentMapper.setupOperation, nil, "asynchronous unzip failure clears operation")
+  equal(lamentMapper.executablePath, oldPath, "unzip failure preserves configured path")
+
+  lamentMapper.setupOperation = {
+    archivePath = archivePath,
+    destinationPath = destinationPath,
+    executablePath = destinationPath .. [[\LamentMapper.exe]],
+    stage = "extracting",
+  }
+  lamentMapper.isReadableFile = function(path)
+    return not path:find("sounds.pack", 1, true) and not path:find("README.html", 1, true)
+  end
+  handlers.sysUnzipDone("sysUnzipDone", archivePath, destinationPath)
+  equal(lamentMapper.setupOperation, nil, "incomplete extraction clears operation")
+  equal(saveCount, 0, "incomplete extraction does not save path")
+  equal(echoed[#echoed - 1]:find("sounds.pack, README.html", 1, true) ~= nil, true,
+      "incomplete extraction lists missing files")
+  equal(lamentMapper.executablePath, oldPath, "incomplete extraction preserves configured path")
+  equal(#removed, 4, "temporary archive removed after every failure")
+
+  unzipAsync = originalUnzipAsync
+  lamentMapper.closeProcess = originalCloseProcess
+  lamentMapper.isReadableFile = originalIsReadableFile
+  lamentMapper.saveExecutablePath = originalSaveExecutablePath
+  os.remove = originalRemove
 end
 
 local function validThree()
@@ -172,6 +500,43 @@ do
   local captured, first = lamentMapper.findMap(rows)
   equal(first, 1, "live riverbank landmark first row")
   equal(#captured, 13, "live riverbank landmark captured size")
+end
+
+do
+  local originalYajl = yajl
+  local originalSpawn = spawn
+  local originalProcess = lamentMapper.process
+  local originalPath = lamentMapper.executablePath
+  local spawnCount = 0
+  local spawnedPath = nil
+  local sentPayload = nil
+
+  yajl = { to_string = function(_) return "{}" end }
+  spawn = function(_, path)
+    spawnCount = spawnCount + 1
+    spawnedPath = path
+    return {
+      isRunning = function()
+        return true
+      end,
+      send = function(payload)
+        sentPayload = payload
+        return true
+      end,
+    }
+  end
+  lamentMapper.process = nil
+  lamentMapper.executablePath = [[C:\Configured\LamentMapper.exe]]
+
+  equal(lamentMapper.sendMap(validThree(), {}), true, "valid map launches configured executable")
+  equal(spawnCount, 1, "valid map launch count")
+  equal(spawnedPath, lamentMapper.executablePath, "valid map launched configured path")
+  equal(sentPayload, "{}\n", "valid map sent after process launch")
+
+  yajl = originalYajl
+  spawn = originalSpawn
+  lamentMapper.process = originalProcess
+  lamentMapper.executablePath = originalPath
 end
 
 do
@@ -380,7 +745,7 @@ do
   equal(spawnCount, 1, "missing configuration does not spawn helper")
   equal(
     echoed[#echoed],
-    "<yellow>LamentMapper is not configured. Run: lamentmapper setup\n",
+    "<yellow>LamentMapper is not configured. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n",
     "missing configuration diagnostic"
   )
 
@@ -404,6 +769,25 @@ do
   spawn = originalSpawn
 end
 
+do
+  local originalRemove = os.remove
+  local removedPath = nil
+  lamentMapper.setupOperation = {
+    archivePath = [[C:\Temp\lamentmapper-exit.zip]],
+    stage = "downloading",
+  }
+  os.remove = function(path)
+    removedPath = path
+    return true
+  end
+  handlers.sysExitEvent("sysExitEvent")
+  equal(removedPath, [[C:\Temp\lamentmapper-exit.zip]], "profile exit removes temporary archive")
+  os.remove = originalRemove
+end
+equal(#lamentMapper.eventHandlers, 0, "profile exit handler cleanup")
+
+lamentMapper.initialize()
+equal(#lamentMapper.eventHandlers, 8, "handlers restored after reinitialization")
 handlers.sysUninstallPackage("sysUninstallPackage", "Accessible Lament Map")
 equal(#lamentMapper.eventHandlers, 0, "uninstall handler cleanup")
 

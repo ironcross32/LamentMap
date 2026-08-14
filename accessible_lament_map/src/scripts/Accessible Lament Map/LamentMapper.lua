@@ -2,7 +2,7 @@
 lamentMapper = lamentMapper or {}
 
 lamentMapper.packageName = "Accessible Lament Map"
-lamentMapper.packageVersion = "1.0.6"
+lamentMapper.packageVersion = "1.1.0"
 lamentMapper.protocolVersion = 1
 lamentMapper.maxMessageBytes = 1024 * 1024
 lamentMapper.process = nil
@@ -11,6 +11,8 @@ lamentMapper.sequence = lamentMapper.sequence or 0
 lamentMapper.responseStart = nil
 lamentMapper.lastObservedLine = nil
 lamentMapper.eventHandlers = lamentMapper.eventHandlers or {}
+lamentMapper.setupOperation = lamentMapper.setupOperation or nil
+lamentMapper.setupSequence = lamentMapper.setupSequence or 0
 lamentMapper.warnedMissing = false
 lamentMapper.promptCount = lamentMapper.promptCount or 0
 lamentMapper.mapsSent = lamentMapper.mapsSent or 0
@@ -119,27 +121,227 @@ function lamentMapper.saveExecutablePath(path)
   return true
 end
 
-function lamentMapper.setup()
+lamentMapper.releaseUrl = "https://github.com/ironcross32/LamentMap/releases/latest/download/LamentMapper-windows-x64.zip"
+lamentMapper.requiredRuntimeFiles = {
+  "LamentMapper.exe",
+  "prism.dll",
+  "sounds.pack",
+  "README.html",
+}
+
+function lamentMapper.joinWindowsPath(directory, name)
+  directory = lamentMapper.trim(tostring(directory or "")):gsub('^"', ""):gsub('"$', ""):gsub("/", "\\")
+  if directory:sub(-1) == "\\" then
+    return directory .. name
+  end
+  return directory .. "\\" .. name
+end
+
+function lamentMapper.isReadableFile(path)
+  local handle = io.open(path, "rb")
+  if not handle then
+    return false
+  end
+  handle:close()
+  return true
+end
+
+function lamentMapper.createTemporaryArchive()
+  local directories = {}
+  local temporaryDirectory = os.getenv("TEMP")
+  if type(temporaryDirectory) == "string" and lamentMapper.trim(temporaryDirectory) ~= "" then
+    directories[#directories + 1] = temporaryDirectory
+  end
+  local profileDirectory = getMudletHomeDir()
+  if #directories == 0 or directories[1] ~= profileDirectory then
+    directories[#directories + 1] = profileDirectory
+  end
+
+  local lastReason = "no writable temporary directory was available"
+  for _, directory in ipairs(directories) do
+    for _ = 1, 100 do
+      lamentMapper.setupSequence = lamentMapper.setupSequence + 1
+      local filename = "lamentmapper-" .. tostring(os.time()) .. "-"
+          .. tostring(lamentMapper.setupSequence) .. ".zip"
+      local path = lamentMapper.joinWindowsPath(directory, filename)
+      local existing = io.open(path, "rb")
+      if existing then
+        existing:close()
+      else
+        local probe, reason = io.open(path, "wb")
+        if probe then
+          probe:close()
+          os.remove(path)
+          return path
+        end
+        lastReason = tostring(reason)
+        break
+      end
+    end
+  end
+  return nil, lastReason
+end
+
+function lamentMapper.printManualRecovery()
+  cecho("<yellow>Manual setup: download the latest LamentMapper Windows x64 release ZIP, extract it, then run 'lamentmapper setup manual' and select LamentMapper.exe.\n")
+end
+
+function lamentMapper.clearAutoSetup()
+  local operation = lamentMapper.setupOperation
+  lamentMapper.setupOperation = nil
+  if operation and operation.archivePath then
+    pcall(os.remove, operation.archivePath)
+  end
+end
+
+function lamentMapper.failAutoSetup(stage, reason)
+  cecho("<red>LamentMapper automatic setup failed during " .. tostring(stage) .. ": "
+      .. tostring(reason or "unknown error") .. "\n")
+  lamentMapper.clearAutoSetup()
+  lamentMapper.printManualRecovery()
+  return false
+end
+
+function lamentMapper.setupManual()
   local selected = invokeFileDialog(true, "Select LamentMapper.exe")
   if not selected or selected == "" then
     cecho("<yellow>LamentMapper setup cancelled.\n")
-    return
+    return false
   end
   selected = lamentMapper.normalizeExecutablePath(selected)
   if not lamentMapper.isExecutablePath(selected) then
     cecho("<red>Please select a file named LamentMapper.exe.\n")
-    return
+    return false
   end
   local ok, reason = lamentMapper.saveExecutablePath(selected)
   if not ok then
     cecho("<red>Could not save the LamentMapper path: " .. tostring(reason) .. "\n")
-    return
+    return false
   end
   lamentMapper.executablePath = selected
   lamentMapper.warnedMissing = false
   lamentMapper.closeProcess()
   cecho("<green>LamentMapper configured: " .. selected .. "\n")
   cecho("<cyan>LamentMapper will start when Mudlet receives a valid ASCII wilderness grid. Use 'survey leagues' or disable Lament's in-game screen-reader mode if automatic grids are hidden.\n")
+  return true
+end
+
+function lamentMapper.setupAuto()
+  if lamentMapper.setupOperation then
+    cecho("<yellow>LamentMapper automatic setup is already in progress.\n")
+    return false
+  end
+  if type(getOS) ~= "function" or getOS() ~= "windows" then
+    cecho("<red>LamentMapper automatic setup is only available on Windows x64 because the application and release artifact are Windows-only.\n")
+    lamentMapper.printManualRecovery()
+    return false
+  end
+  if type(downloadFile) ~= "function" or type(unzipAsync) ~= "function" then
+    cecho("<red>LamentMapper automatic setup requires Mudlet 4.6 or newer with downloadFile and unzipAsync support.\n")
+    lamentMapper.printManualRecovery()
+    return false
+  end
+
+  local destination = invokeFileDialog(false, "Select the folder where LamentMapper should be installed")
+  if not destination or destination == "" then
+    cecho("<yellow>LamentMapper automatic setup cancelled.\n")
+    return false
+  end
+  destination = lamentMapper.trim(destination):gsub('^"', ""):gsub('"$', ""):gsub("/", "\\")
+
+  local archivePath, reason = lamentMapper.createTemporaryArchive()
+  if not archivePath then
+    return lamentMapper.failAutoSetup("temporary archive creation", reason)
+  end
+
+  lamentMapper.setupOperation = {
+    archivePath = archivePath,
+    destinationPath = destination,
+    executablePath = lamentMapper.joinWindowsPath(destination, "LamentMapper.exe"),
+    stage = "downloading",
+  }
+  cecho("<cyan>Downloading the latest LamentMapper Windows x64 release...\n")
+  local ok, downloadReason = pcall(downloadFile, archivePath, lamentMapper.releaseUrl)
+  if not ok then
+    return lamentMapper.failAutoSetup("download startup", downloadReason)
+  end
+  return true
+end
+
+function lamentMapper.setup(mode)
+  if mode == nil or mode == "" or mode == "manual" then
+    return lamentMapper.setupManual()
+  end
+  if mode == "auto" then
+    return lamentMapper.setupAuto()
+  end
+  cecho("<red>Unknown setup mode. Use 'lamentmapper setup auto' or 'lamentmapper setup manual'.\n")
+  return false
+end
+
+function lamentMapper.onDownloadDone(_, filename)
+  local operation = lamentMapper.setupOperation
+  if not operation or operation.stage ~= "downloading" or filename ~= operation.archivePath then
+    return
+  end
+  operation.stage = "extracting"
+  lamentMapper.closeProcess()
+  cecho("<cyan>Download complete. Extracting LamentMapper into " .. operation.destinationPath .. "...\n")
+  local ok, started, reason = pcall(unzipAsync, operation.archivePath, operation.destinationPath)
+  if not ok then
+    lamentMapper.failAutoSetup("extraction startup", started)
+  elseif not started then
+    lamentMapper.failAutoSetup("extraction startup", reason or "Mudlet could not start ZIP extraction")
+  end
+end
+
+function lamentMapper.onDownloadError(_, reason, filename, _)
+  local operation = lamentMapper.setupOperation
+  if not operation or operation.stage ~= "downloading" or filename ~= operation.archivePath then
+    return
+  end
+  lamentMapper.failAutoSetup("download", reason)
+end
+
+function lamentMapper.onUnzipDone(_, archivePath, destinationPath)
+  local operation = lamentMapper.setupOperation
+  if not operation or operation.stage ~= "extracting"
+      or archivePath ~= operation.archivePath or destinationPath ~= operation.destinationPath then
+    return
+  end
+
+  local missing = {}
+  for _, filename in ipairs(lamentMapper.requiredRuntimeFiles) do
+    local path = lamentMapper.joinWindowsPath(operation.destinationPath, filename)
+    if not lamentMapper.isReadableFile(path) then
+      missing[#missing + 1] = filename
+    end
+  end
+  if #missing > 0 then
+    lamentMapper.failAutoSetup("extracted-file validation", "missing or unreadable: " .. table.concat(missing, ", "))
+    return
+  end
+
+  local ok, reason = lamentMapper.saveExecutablePath(operation.executablePath)
+  if not ok then
+    lamentMapper.failAutoSetup("configuration save", reason)
+    return
+  end
+  local executablePath = operation.executablePath
+  lamentMapper.executablePath = executablePath
+  lamentMapper.warnedMissing = false
+  lamentMapper.clearAutoSetup()
+  cecho("<green>LamentMapper installed and configured: " .. executablePath .. "\n")
+  cecho("<cyan>LamentMapper will start when Mudlet receives the next valid ASCII wilderness grid.\n")
+end
+
+function lamentMapper.onUnzipError(_, archivePath, destinationPath)
+  local operation = lamentMapper.setupOperation
+  if not operation or operation.stage ~= "extracting"
+      or archivePath ~= operation.archivePath or destinationPath ~= operation.destinationPath then
+    return
+  end
+  lamentMapper.failAutoSetup("extraction", "Mudlet reported that ZIP extraction failed")
 end
 
 function lamentMapper.isProcessRunning()
@@ -193,7 +395,7 @@ function lamentMapper.focusMapper()
   end
   local path = lamentMapper.executablePath or lamentMapper.loadExecutablePath()
   if not path then
-    cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup\n")
+    cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n")
     return false
   end
   lamentMapper.executablePath = path
@@ -231,7 +433,7 @@ function lamentMapper.ensureProcess()
   local path = lamentMapper.executablePath or lamentMapper.loadExecutablePath()
   if not path then
     if not lamentMapper.warnedMissing then
-      cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup\n")
+      cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup auto (or 'lamentmapper setup manual' for an existing installation).\n")
       lamentMapper.warnedMissing = true
     end
     return false
@@ -545,7 +747,8 @@ end
 function lamentMapper.onInstall(_, packageName)
   if packageName == lamentMapper.packageName then
     lamentMapper.resetCapture()
-    cecho("<green>Accessible Lament Map installed. Run: lamentmapper setup\n")
+    cecho("<green>Accessible Lament Map installed. Run: lamentmapper setup auto\n")
+    cecho("<cyan>For an existing extracted copy, run: lamentmapper setup manual\n")
   end
 end
 
@@ -559,6 +762,7 @@ end
 function lamentMapper.cleanup()
   lamentMapper.closeProcess()
   lamentMapper.closeFocusHelper()
+  lamentMapper.clearAutoSetup()
   lamentMapper.unregisterHandlers()
 end
 
@@ -569,8 +773,7 @@ function lamentMapper.onUninstall(_, packageName)
 end
 
 function lamentMapper.onExit()
-  lamentMapper.closeProcess()
-  lamentMapper.closeFocusHelper()
+  lamentMapper.cleanup()
 end
 
 function lamentMapper.registerHandler(eventName, callbackName)
@@ -584,12 +787,17 @@ function lamentMapper.registerHandler(eventName, callbackName)
 end
 
 function lamentMapper.initialize()
+  lamentMapper.clearAutoSetup()
   lamentMapper.unregisterHandlers()
   lamentMapper.executablePath = lamentMapper.loadExecutablePath()
   lamentMapper.registerHandler("sysInstallPackage", "lamentMapper.onInstall")
   lamentMapper.registerHandler("sysUninstallPackage", "lamentMapper.onUninstall")
   lamentMapper.registerHandler("sysExitEvent", "lamentMapper.onExit")
   lamentMapper.registerHandler("sysBufferShrinkEvent", "lamentMapper.onBufferShrink")
+  lamentMapper.registerHandler("sysDownloadDone", "lamentMapper.onDownloadDone")
+  lamentMapper.registerHandler("sysDownloadError", "lamentMapper.onDownloadError")
+  lamentMapper.registerHandler("sysUnzipDone", "lamentMapper.onUnzipDone")
+  lamentMapper.registerHandler("sysUnzipError", "lamentMapper.onUnzipError")
   lamentMapper.resetCapture()
 end
 

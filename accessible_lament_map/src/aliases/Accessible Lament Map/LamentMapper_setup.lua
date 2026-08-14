@@ -1,1 +1,1 @@
-lamentMapper.setup()
+lamentMapper.setup(matches[2])

@@ -3,9 +3,20 @@
 This Mudlet package detects complete Lament wilderness maps between real prompt
 events and sends them to `LamentMapper.exe` over standard input.
 
-After importing the generated `.mpackage`, run `lamentmapper setup` and select
-`LamentMapper.exe`. Use `lamentmapper status` to inspect the configured path and
-managed-process state.
+After importing the generated `.mpackage`, run `lamentmapper setup auto` and
+select the folder where LamentMapper should be installed. Automatic setup requires
+Windows x64 and Mudlet 4.6 or newer. It downloads the latest Windows x64 release,
+extracts it into the selected folder, validates its runtime files, and saves the
+inferred executable path.
+
+Selecting an existing LamentMapper folder performs an in-place update. Files absent
+from the release archive, including `config.toml`, are preserved. For manual
+setup, download and extract the release ZIP, run `lamentmapper setup manual`, and
+select `LamentMapper.exe`. The original `lamentmapper setup` command continues to
+invoke manual setup.
+
+Use `lamentmapper status` to inspect the configured path and managed-process
+state.
 
 Press Ctrl+Space in Mudlet to focus the managed LamentMapper window when it is
 already running. The key reports an unavailable window without launching the mapper.

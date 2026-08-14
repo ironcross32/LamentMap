@@ -18,10 +18,19 @@ supported in this release.
 
 ## Setup
 
-1. Extract the portable ZIP to a directory you can keep.
-2. Import `Accessible Lament Map.mpackage` into the desired Mudlet profile.
-3. In that profile, enter `lamentmapper setup`.
-4. Select the extracted `LamentMapper.exe`.
+1. Import `Accessible Lament Map.mpackage` into the desired Mudlet profile.
+2. In that profile, enter `lamentmapper setup auto`.
+3. Select the folder where LamentMapper should be installed.
+
+Automatic setup requires Windows x64 and Mudlet 4.6 or newer. It downloads the
+latest Windows x64 release over HTTPS, extracts it into the selected folder, and
+configures the inferred `LamentMapper.exe` path. Selecting an existing
+LamentMapper folder updates it in place. Files that are not in the release archive,
+including `config.toml`, are preserved.
+
+For manual setup, download and extract the latest Windows x64 release ZIP, enter
+`lamentmapper setup manual`, and select the extracted `LamentMapper.exe`.
+The original `lamentmapper setup` command remains an alias for manual setup.
 
 Use `lamentmapper status` to report the normalized executable path and whether
 the Mudlet-managed child process is running. If the application is closed, the
@@ -87,7 +96,11 @@ but it may be silent. The Preferences dialog warns before accepting that choice.
 
 ## Troubleshooting
 
-- If Mudlet says the executable is not configured, run `lamentmapper setup`.
+- If Mudlet says the executable is not configured, run
+  `lamentmapper setup auto`, or use `lamentmapper setup manual` for an
+  existing extracted installation.
+- If automatic setup fails, download and extract the latest Windows x64 release
+  ZIP, then run `lamentmapper setup manual` and select `LamentMapper.exe`.
 - Keep `prism.dll`, `sounds.pack`, and `README.html` beside the executable.
 - Prism is required. If prism.dll is missing, corrupt, incompatible, or cannot
   acquire a screen-reader backend, LamentMapper shows a native error dialog and

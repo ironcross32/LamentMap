@@ -1,7 +1,7 @@
 [
   {
     "name": "LamentMapper setup",
-    "regex": "^lamentmapper\\s+setup\\s*$"
+    "regex": "^lamentmapper\\s+setup(?:\\s+(manual|auto))?\\s*$"
   },
   {
     "name": "LamentMapper status",
