@@ -70,7 +70,8 @@ jobs:
             @{ XPath = "//Script[name='LamentMapper']/script"; Marker = "lamentMapper.initialize()" },
             @{ XPath = "//Alias[name='LamentMapper setup']/script"; Marker = "lamentMapper.setup()" },
             @{ XPath = "//Alias[name='LamentMapper status']/script"; Marker = "lamentMapper.status()" },
-            @{ XPath = "//Trigger[name='LamentMapper prompt boundary']/script"; Marker = "lamentMapper.onPrompt()" }
+            @{ XPath = "//Trigger[name='LamentMapper prompt boundary']/script"; Marker = "lamentMapper.onPrompt()" },
+            @{ XPath = "//Key[name='LamentMapper focus']/script"; Marker = "lamentMapper.focusMapper()" }
           )
           foreach ($item in $required) {
             $node = $xml.SelectSingleNode($item.XPath)

@@ -2,10 +2,11 @@
 lamentMapper = lamentMapper or {}
 
 lamentMapper.packageName = "Accessible Lament Map"
-lamentMapper.packageVersion = "1.0.5"
+lamentMapper.packageVersion = "1.0.6"
 lamentMapper.protocolVersion = 1
 lamentMapper.maxMessageBytes = 1024 * 1024
 lamentMapper.process = nil
+lamentMapper.focusHelper = nil
 lamentMapper.sequence = lamentMapper.sequence or 0
 lamentMapper.responseStart = nil
 lamentMapper.lastObservedLine = nil
@@ -159,6 +160,52 @@ function lamentMapper.closeProcess()
       process.close()
     end)
   end
+end
+
+function lamentMapper.closeFocusHelper()
+  local helper = lamentMapper.focusHelper
+  lamentMapper.focusHelper = nil
+  if helper then
+    pcall(function()
+      helper.close()
+    end)
+  end
+end
+
+function lamentMapper.onFocusHelperOutput(output)
+  local message = lamentMapper.trim(tostring(output or ""))
+  if message == "" then
+    return
+  end
+  if message:sub(1, 3) == "OK:" then
+    cecho("<green>" .. lamentMapper.trim(message:sub(4)) .. "\n")
+  elseif message:sub(1, 6) == "ERROR:" then
+    cecho("<red>" .. lamentMapper.trim(message:sub(7)) .. "\n")
+  else
+    cecho("<red>LamentMapper focus helper: " .. message .. "\n")
+  end
+end
+
+function lamentMapper.focusMapper()
+  if not lamentMapper.isProcessRunning() then
+    cecho("<yellow>No LamentMapper window is available; the managed mapper is not running.\n")
+    return false
+  end
+  local path = lamentMapper.executablePath or lamentMapper.loadExecutablePath()
+  if not path then
+    cecho("<yellow>LamentMapper is not configured. Run: lamentmapper setup\n")
+    return false
+  end
+  lamentMapper.executablePath = path
+  local ok, helperOrReason = pcall(function()
+    return spawn(lamentMapper.onFocusHelperOutput, path, "--focus-existing")
+  end)
+  if not ok or not helperOrReason then
+    cecho("<red>Could not focus LamentMapper: " .. tostring(helperOrReason) .. "\n")
+    return false
+  end
+  lamentMapper.focusHelper = helperOrReason
+  return true
 end
 
 function lamentMapper.status()
@@ -511,6 +558,7 @@ end
 
 function lamentMapper.cleanup()
   lamentMapper.closeProcess()
+  lamentMapper.closeFocusHelper()
   lamentMapper.unregisterHandlers()
 end
 
@@ -522,6 +570,7 @@ end
 
 function lamentMapper.onExit()
   lamentMapper.closeProcess()
+  lamentMapper.closeFocusHelper()
 end
 
 function lamentMapper.registerHandler(eventName, callbackName)

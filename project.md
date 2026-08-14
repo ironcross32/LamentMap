@@ -4,7 +4,7 @@ This will be a Windows x64 application written in Rust using wxDragon for its UI
 
 The aim is to allow blind players who rely on a screen reader to access the highly visual wilderness map. A Mudlet package will capture each complete map, preserve its text and formatting, encode it as versioned JSON, and send it to this application. The application will validate and interpret the map before presenting it in an accessible form.
 
-The exploration cursor will be placed at the player's position whenever a new map is received. The arrow keys navigate one cell at a time, with Up being north, Right east, Down south, and Left west. Space returns the cursor to the player's position.
+The exploration cursor will be placed at the player's position whenever a new map is received. The arrow keys navigate one cell at a time, with Up being north, Right east, Down south, and Left west. With Num Lock on, numpad 8, 9, 6, 3, 2, 1, 4, and 7 navigate north, northeast, east, southeast, south, southwest, west, and northwest. Space and numpad 5 return the cursor to the player's position. Numpad 0 reads the map dimensions like D.
 
 Speech and short sounds indicate terrain, with configurable announcements of the cursor's displacement from the player, for example: 3 east, 6 north.
 
@@ -24,7 +24,7 @@ A map with `N` logical rows is encoded as exactly `N` text rows of `2N` characte
 
 Leading spaces, trailing spaces, and rows consisting entirely of spaces are significant and must never be trimmed. They represent unseen locations while preserving the square grid.
 
-The player is shown by a single `*` in the second character of the center cell. This replaces that character rather than being inserted; for example, dense forest at the player position appears as `T*`. The hidden character cannot always be reconstructed for mixed-character terrain tokens, so the center cell is represented as the player location and uses the dedicated center sound instead of guessing its underlying terrain.
+The player is shown by a single `*` in the second character of the center cell. This replaces that character rather than being inserted; for example, dense forest at the player position appears as `T*`. Infer terrain only when the remaining first character identifies one documented token uniquely. In that case, announce the terrain followed by `(player's position)` and play its terrain cue together with the player cue. Ambiguous prefixes such as `s*`, `.*`, and `x*` retain the generic player announcement and cue rather than guessing.
 
 Landmarks are markers rather than terrain and obscure the first character of the underlying terrain token. The unobscured second character remains in the map; for example, a landmark over dense forest is `#T`. Both `#` and `@` marker forms share the Landmark semantic and sound.
 

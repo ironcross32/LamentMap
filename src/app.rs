@@ -1,11 +1,15 @@
 use lament_mapper::audio::AudioEngine;
 use lament_mapper::config::{Config, ConfigRecovery, FeedbackMode, load_or_repair, save_atomic};
 use lament_mapper::feedback::{Feedback, SoundOutput, SpeechOutput};
+use lament_mapper::map_input::{
+    HostKeyAction, KeyModifiers, classify_key, dimensions_readout, terrain_readout,
+};
 use lament_mapper::model::Map;
-use lament_mapper::navigation::{Action, Cursor, MoveResult, announcement};
+use lament_mapper::navigation::{Cursor, MoveResult, announcement};
 use lament_mapper::prism::Prism;
 use lament_mapper::protocol::parse_line;
 use lament_mapper::transport::{InputTransport, TransportEvent};
+use lament_mapper::window_focus;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -19,11 +23,13 @@ use wxdragon::prelude::*;
 
 const MENU_PREFERENCES: i32 = ID_HIGHEST + 101;
 const MENU_README: i32 = ID_HIGHEST + 102;
-const KEY_LEFT: i32 = 314;
-const KEY_UP: i32 = 315;
-const KEY_RIGHT: i32 = 316;
-const KEY_DOWN: i32 = 317;
-const KEY_SPACE: i32 = 32;
+const SPEECH_LABEL: &str = "Speech";
+const SPEECH_AND_SOUNDS_LABEL: &str = "Speech and sounds";
+const SOUNDS_LABEL: &str = "Sounds";
+const DIRECTIONS_LABEL: &str = "Announce directions relative to the player";
+const NEW_MAP_ALERT_LABEL: &str = "Play the new-map alert";
+const OK_LABEL: &str = "OK";
+const CANCEL_LABEL: &str = "Cancel";
 
 struct PrismSpeech(Prism);
 
@@ -77,6 +83,28 @@ impl AccessibleImpl for MapHostAccessible {
     }
 }
 
+/// Supplies only an MSAA name and delegates every other property to the
+/// control's native accessible object.
+struct NameOnlyAccessible(String);
+
+impl AccessibleImpl for NameOnlyAccessible {
+    fn get_child_count(&self) -> (AccStatus, i32) {
+        (AccStatus::NotImplemented, 0)
+    }
+
+    fn get_name(&self, child_id: i32) -> (AccStatus, Option<String>) {
+        if child_id == 0 {
+            (AccStatus::Ok, Some(self.0.clone()))
+        } else {
+            (AccStatus::NotImplemented, None)
+        }
+    }
+}
+
+fn set_accessible_name(widget: &dyn WxWidget, name: &str) {
+    widget.set_accessible(Accessible::new(widget, NameOnlyAccessible(name.to_owned())));
+}
+
 impl SpeechOutput for PrismSpeech {
     fn output(&mut self, phrase: &str) -> Result<(), String> {
         self.0.send(phrase).map_err(|error| error.to_string())
@@ -91,6 +119,7 @@ struct State {
     config: Config,
     config_path: PathBuf,
     feedback: AppFeedback,
+    mudlet_process_id: Option<u32>,
     last_map: Option<Instant>,
     displayed_status: String,
 }
@@ -180,16 +209,24 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             speech: PrismSpeech(prism),
             audio,
         };
+        let managed_stdin = stdin_is_pipe();
+        let mudlet_process_id = managed_stdin.then(window_focus::parent_process_id).flatten();
+        if let Some(process_id) = mudlet_process_id {
+            log::info!("recorded managed Mudlet parent process {process_id}");
+        } else if managed_stdin {
+            log::warn!("managed stdin detected, but its parent process could not be determined");
+        }
         let state = Rc::new(RefCell::new(State {
             map: None,
             cursor: None,
             config,
             config_path,
             feedback,
+            mudlet_process_id,
             last_map: None,
             displayed_status: "Ready".into(),
         }));
-        let transport = if stdin_is_pipe() {
+        let transport = if managed_stdin {
             log::info!("managed stdin pipe detected");
             Some(Rc::new(InputTransport::spawn(std::io::stdin(), 8)))
         } else {
@@ -330,36 +367,60 @@ fn bind_keyboard(host: &Panel, grid: &Grid, state: &Rc<RefCell<State>>) {
             event.skip(true);
             return;
         };
-        let action = match keyboard.get_key_code() {
-            Some(KEY_UP) => Some(Action::North),
-            Some(KEY_RIGHT) => Some(Action::East),
-            Some(KEY_DOWN) => Some(Action::South),
-            Some(KEY_LEFT) => Some(Action::West),
-            Some(KEY_SPACE) => Some(Action::Center),
-            _ => None,
-        };
-        let Some(action) = action else {
+        let key_action = classify_key(
+            keyboard.get_key_code().unwrap_or_default(),
+            KeyModifiers {
+                control: keyboard.control_down(),
+                shift: keyboard.shift_down(),
+                alt: keyboard.alt_down(),
+                meta: keyboard.meta_down(),
+            },
+        );
+        if key_action == HostKeyAction::PassThrough {
             event.skip(true);
             return;
-        };
+        }
+
         event.skip(false);
+        grid.clear_selection();
         let mut state = state.borrow_mut();
-        let Some(map) = state.map.clone() else {
-            return;
-        };
-        let previous_cursor = state.cursor;
-        let mut cursor = previous_cursor.unwrap_or_else(|| Cursor::centered(&map));
-        let result = cursor.apply(&map, action);
-        state.cursor = Some(cursor);
-        let cell = map.cell(cursor.row, cursor.column).expect("valid cursor");
-        let phrase = if result == MoveResult::Boundary {
-            "Map boundary.".to_owned()
-        } else {
-            announcement(&map, cursor, state.config.feedback.announce_directions)
-        };
-        render_visual_cursor(&grid, previous_cursor, cursor);
-        grid.make_cell_visible(cursor.row as i32, cursor.column as i32);
-        state.feedback.navigation(result, cell.kind, &phrase);
+        match key_action {
+            HostKeyAction::Consume | HostKeyAction::PassThrough => {}
+            HostKeyAction::FocusMudlet => {
+                let focused = state
+                    .mudlet_process_id
+                    .is_some_and(window_focus::focus_parent_window);
+                if !focused {
+                    state.feedback.explicit("Mudlet window unavailable.");
+                }
+            }
+            HostKeyAction::TerrainReadout => {
+                let phrase = terrain_readout(state.map.as_ref(), state.cursor);
+                state.feedback.explicit(&phrase);
+            }
+            HostKeyAction::DimensionsReadout => {
+                let phrase = dimensions_readout(state.map.as_ref());
+                state.feedback.explicit(&phrase);
+            }
+            HostKeyAction::Navigate(action) => {
+                let Some(map) = state.map.clone() else {
+                    return;
+                };
+                let previous_cursor = state.cursor;
+                let mut cursor = previous_cursor.unwrap_or_else(|| Cursor::centered(&map));
+                let result = cursor.apply(&map, action);
+                state.cursor = Some(cursor);
+                let cell = map.cell(cursor.row, cursor.column).expect("valid cursor");
+                let phrase = if result == MoveResult::Boundary {
+                    "Map boundary.".to_owned()
+                } else {
+                    announcement(&map, cursor, state.config.feedback.announce_directions)
+                };
+                render_visual_cursor(&grid, previous_cursor, cursor);
+                grid.make_cell_visible(cursor.row as i32, cursor.column as i32);
+                state.feedback.navigation(result, cell.kind, &phrase);
+            }
+        }
     });
 }
 
@@ -425,36 +486,53 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
     let dialog = Dialog::builder(parent, "LamentMapper Preferences")
         .with_size(440, 330)
         .build();
-    let speech = RadioButton::builder(&dialog)
-        .with_label("Speech")
+    let group =
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Cursor feedback").build();
+    let group_box = group
+        .get_static_box()
+        .expect("a labelled static-box sizer owns its static box");
+    let speech = RadioButton::builder(&group_box)
+        .with_label(SPEECH_LABEL)
         .first_in_group()
         .build();
-    let both = RadioButton::builder(&dialog)
-        .with_label("Speech and sounds")
+    let both = RadioButton::builder(&group_box)
+        .with_label(SPEECH_AND_SOUNDS_LABEL)
         .build();
-    let sounds = RadioButton::builder(&dialog).with_label("Sounds").build();
+    let sounds = RadioButton::builder(&group_box).with_label(SOUNDS_LABEL).build();
     match current.feedback.mode {
         FeedbackMode::Speech => speech.set_value(true),
         FeedbackMode::SpeechAndSounds => both.set_value(true),
         FeedbackMode::Sounds => sounds.set_value(true),
     }
     let directions = CheckBox::builder(&dialog)
-        .with_label("Announce directions relative to the player")
+        .with_label(DIRECTIONS_LABEL)
         .with_value(current.feedback.announce_directions)
         .build();
     let new_map = CheckBox::builder(&dialog)
-        .with_label("Play the new-map alert")
+        .with_label(NEW_MAP_ALERT_LABEL)
         .with_value(current.feedback.new_map_alert)
         .build();
-    let ok = Button::builder(&dialog).with_id(ID_OK).with_label("OK").build();
+    let ok = Button::builder(&dialog)
+        .with_id(ID_OK)
+        .with_label(OK_LABEL)
+        .build();
     let cancel = Button::builder(&dialog)
         .with_id(ID_CANCEL)
-        .with_label("Cancel")
+        .with_label(CANCEL_LABEL)
         .build();
+    for (control, label) in [
+        (&speech as &dyn WxWidget, SPEECH_LABEL),
+        (&both as &dyn WxWidget, SPEECH_AND_SOUNDS_LABEL),
+        (&sounds as &dyn WxWidget, SOUNDS_LABEL),
+        (&directions as &dyn WxWidget, DIRECTIONS_LABEL),
+        (&new_map as &dyn WxWidget, NEW_MAP_ALERT_LABEL),
+        (&ok as &dyn WxWidget, OK_LABEL),
+        (&cancel as &dyn WxWidget, CANCEL_LABEL),
+    ] {
+        set_accessible_name(control, label);
+    }
 
     let outer = BoxSizer::builder(Orientation::Vertical).build();
-    let group =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Cursor feedback").build();
     group.add(&speech, 0, SizerFlag::All, 6);
     group.add(&both, 0, SizerFlag::All, 6);
     group.add(&sounds, 0, SizerFlag::All, 6);
@@ -572,6 +650,7 @@ fn render_visual_cursor(grid: &Grid, previous: Option<Cursor>, current: Cursor) 
     if let Some(font) = map_font(true) {
         grid.set_cell_font(current.row as i32, current.column as i32, &font);
     }
+    grid.clear_selection();
     grid.refresh(false, None);
 }
 
@@ -607,5 +686,26 @@ fn status_text(last_map: Option<Instant>) -> String {
             "Map received {minutes} minute{} ago",
             if minutes == 1 { "" } else { "s" }
         )
+    }
+}
+
+#[cfg(test)]
+mod accessibility_tests {
+    use super::*;
+
+    #[test]
+    fn name_only_accessible_delegates_child_count() {
+        let accessible = NameOnlyAccessible("Speech".into());
+        assert_eq!(accessible.get_child_count(), (AccStatus::NotImplemented, 0));
+    }
+
+    #[test]
+    fn name_only_accessible_names_only_the_control_itself() {
+        let accessible = NameOnlyAccessible("Speech and sounds".into());
+        assert_eq!(
+            accessible.get_name(0),
+            (AccStatus::Ok, Some("Speech and sounds".into()))
+        );
+        assert_eq!(accessible.get_name(1), (AccStatus::NotImplemented, None));
     }
 }

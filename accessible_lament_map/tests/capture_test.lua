@@ -43,7 +43,7 @@ local function equal(actual, expected, label)
   end
 end
 
-equal(lamentMapper.packageVersion, "1.0.5", "package diagnostic version")
+equal(lamentMapper.packageVersion, "1.0.6", "package diagnostic version")
 equal(handlerNumber, 4, "registered lifecycle handlers")
 equal(type(handlers.sysInstallPackage), "function", "install handler")
 handlers.sysInstallPackage("sysInstallPackage", "Accessible Lament Map")
@@ -309,6 +309,99 @@ do
     "survey-without-grid status"
   )
   equal(#echoed, before + 1, "survey-without-grid warning")
+end
+
+do
+  local originalProcess = lamentMapper.process
+  local originalPath = lamentMapper.executablePath
+  local originalLoadPath = lamentMapper.loadExecutablePath
+  local originalIsProcessRunning = lamentMapper.isProcessRunning
+  local originalSpawn = spawn
+  local spawnCount = 0
+  local callback = nil
+  local helperClosed = false
+  local spawnedPath = nil
+  local spawnedArgument = nil
+
+  spawn = function(readFunction, path, argument)
+    spawnCount = spawnCount + 1
+    callback = readFunction
+    spawnedPath = path
+    spawnedArgument = argument
+    return {
+      close = function()
+        helperClosed = true
+      end,
+    }
+  end
+  lamentMapper.isProcessRunning = function()
+    return true
+  end
+  lamentMapper.process = {
+    isRunning = function()
+      return true
+    end,
+  }
+  lamentMapper.executablePath = [[C:\Apps\LamentMapper.exe]]
+  equal(lamentMapper.focusMapper(), true, "running mapper starts focus helper")
+  equal(spawnCount, 1, "focus helper spawn count")
+  equal(spawnedPath, [[C:\Apps\LamentMapper.exe]], "focus helper executable")
+  equal(spawnedArgument, "--focus-existing", "focus helper argument")
+  callback("OK: LamentMapper window focused.\n")
+  equal(echoed[#echoed], "<green>LamentMapper window focused.\n", "focus helper success output")
+  callback("ERROR: LamentMapper window unavailable.\n")
+  equal(echoed[#echoed], "<red>LamentMapper window unavailable.\n", "focus helper failure output")
+
+  lamentMapper.isProcessRunning = function()
+    return false
+  end
+  lamentMapper.process = nil
+  equal(lamentMapper.focusMapper(), false, "stopped mapper is not launched by focus key")
+  equal(spawnCount, 1, "stopped mapper does not spawn helper")
+  equal(
+    echoed[#echoed],
+    "<yellow>No LamentMapper window is available; the managed mapper is not running.\n",
+    "stopped mapper diagnostic"
+  )
+
+  lamentMapper.isProcessRunning = function()
+    return true
+  end
+  lamentMapper.process = {
+    isRunning = function()
+      return true
+    end,
+  }
+  lamentMapper.executablePath = nil
+  lamentMapper.loadExecutablePath = function()
+    return nil
+  end
+  equal(lamentMapper.focusMapper(), false, "missing focus helper configuration")
+  equal(spawnCount, 1, "missing configuration does not spawn helper")
+  equal(
+    echoed[#echoed],
+    "<yellow>LamentMapper is not configured. Run: lamentmapper setup\n",
+    "missing configuration diagnostic"
+  )
+
+  lamentMapper.executablePath = [[C:\Apps\LamentMapper.exe]]
+  spawn = function(_, _, _)
+    error("simulated helper failure")
+  end
+  equal(lamentMapper.focusMapper(), false, "focus helper spawn failure")
+  equal(
+    echoed[#echoed]:find("simulated helper failure", 1, true) ~= nil,
+    true,
+    "focus helper spawn failure output includes reason"
+  )
+
+  lamentMapper.closeFocusHelper()
+  equal(helperClosed, true, "focus helper cleanup")
+  lamentMapper.process = originalProcess
+  lamentMapper.executablePath = originalPath
+  lamentMapper.loadExecutablePath = originalLoadPath
+  lamentMapper.isProcessRunning = originalIsProcessRunning
+  spawn = originalSpawn
 end
 
 handlers.sysUninstallPackage("sysUninstallPackage", "Accessible Lament Map")

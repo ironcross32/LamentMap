@@ -7,6 +7,9 @@ After importing the generated `.mpackage`, run `lamentmapper setup` and select
 `LamentMapper.exe`. Use `lamentmapper status` to inspect the configured path and
 managed-process state.
 
+Press Ctrl+Space in Mudlet to focus the managed LamentMapper window when it is
+already running. The key reports an unavailable window without launching the mapper.
+
 Every valid grid from a new prompt-delimited response is sent, including a grid
 identical to the previous one. This ensures repeated surveys and visually identical
 world positions still reset the explorer cursor. A failed process write is retried once.

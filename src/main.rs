@@ -2,6 +2,15 @@
 
 #[cfg(windows)]
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--focus-existing")) {
+        if lament_mapper::window_focus::focus_existing_mapper() {
+            lament_mapper::window_focus::write_helper_output("OK: LamentMapper window focused.\n");
+        } else {
+            lament_mapper::window_focus::write_helper_output("ERROR: LamentMapper window unavailable.\n");
+        }
+        return;
+    }
+
     let runtime_dir = lament_mapper::runtime_dir();
     #[cfg(debug_assertions)]
     eprintln!(

@@ -229,7 +229,7 @@ pub fn build_pack(source_directory: &Path, output: &Path) -> Result<(), PackErro
 pub struct AudioEngine {
     pack: Option<SoundPack>,
     _device: Option<MixerDeviceSink>,
-    navigation: Option<Player>,
+    navigation: Vec<Player>,
     notification: Option<Player>,
     warned_missing: HashSet<String>,
 }
@@ -245,12 +245,12 @@ impl AudioEngine {
         };
         match DeviceSinkBuilder::open_default_sink() {
             Ok(device) => {
-                let navigation = Player::connect_new(device.mixer());
+                let navigation = (0..2).map(|_| Player::connect_new(device.mixer())).collect();
                 let notification = Player::connect_new(device.mixer());
                 Self {
                     pack,
                     _device: Some(device),
-                    navigation: Some(navigation),
+                    navigation,
                     notification: Some(notification),
                     warned_missing: HashSet::new(),
                 }
@@ -260,7 +260,7 @@ impl AudioEngine {
                 Self {
                     pack,
                     _device: None,
-                    navigation: None,
+                    navigation: Vec::new(),
                     notification: None,
                     warned_missing: HashSet::new(),
                 }
@@ -282,20 +282,50 @@ impl AudioEngine {
             return;
         };
         let player = if navigation {
-            &self.navigation
+            self.navigation.first()
         } else {
-            &self.notification
+            self.notification.as_ref()
         };
         if let Some(player) = player {
             player.stop();
             player.append(source);
         }
     }
+
+    fn play_navigation(&mut self, cue_ids: &[&str]) {
+        let mut sources = Vec::with_capacity(cue_ids.len().min(self.navigation.len()));
+        for id in cue_ids.iter().take(self.navigation.len()) {
+            let Some(bytes) = self.pack.as_ref().and_then(|pack| pack.cue(id)) else {
+                if self.warned_missing.insert((*id).into()) {
+                    log::warn!("sound cue unavailable: {id}");
+                }
+                sources.push(None);
+                continue;
+            };
+            let Ok(source) = Decoder::try_from(Cursor::new(bytes.to_vec())) else {
+                if self.warned_missing.insert((*id).into()) {
+                    log::warn!("sound cue could not be decoded: {id}");
+                }
+                sources.push(None);
+                continue;
+            };
+            sources.push(Some(source));
+        }
+
+        for player in &self.navigation {
+            player.stop();
+        }
+        for (player, source) in self.navigation.iter().zip(sources) {
+            if let Some(source) = source {
+                player.append(source);
+            }
+        }
+    }
 }
 
 impl SoundOutput for AudioEngine {
-    fn navigation(&mut self, cue_id: &str) {
-        self.play(cue_id, true);
+    fn navigation(&mut self, cue_ids: &[&str]) {
+        self.play_navigation(cue_ids);
     }
     fn notification(&mut self, cue_id: &str) {
         self.play(cue_id, false);

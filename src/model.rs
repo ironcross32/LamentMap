@@ -103,6 +103,29 @@ impl Terrain {
         })
     }
 
+    /// Infers terrain only when the visible first character of a player token
+    /// belongs to exactly one documented terrain token.
+    pub fn from_player_token(token: &str) -> Option<Self> {
+        Some(match token.as_bytes() {
+            b"^*" => Self::Ocean,
+            b"\"*" => Self::Plains,
+            b"t*" => Self::LightForests,
+            b"T*" => Self::DenseForests,
+            b"n*" => Self::Hills,
+            b"V*" => Self::Badlands,
+            b"/*" => Self::Mountains,
+            b"M*" => Self::HighMountains,
+            b"-*" => Self::Lakes,
+            b"~*" => Self::Rivers,
+            b"i*" => Self::IceFields,
+            b"=*" => Self::Road,
+            b"f*" => Self::LightFungus,
+            b"F*" => Self::DenseFungus,
+            // s*, .*, and x* each match multiple terrain tokens.
+            _ => return None,
+        })
+    }
+
     pub const fn cue_id(self) -> &'static str {
         match self {
             Self::Ocean => "ocean",
@@ -204,7 +227,7 @@ const fn terrain_token_remainder(terrain: Terrain) -> u8 {
 pub enum CellKind {
     Terrain(Terrain),
     Landmark,
-    Player,
+    Player(Option<Terrain>),
     Unseen,
 }
 
@@ -213,7 +236,8 @@ impl CellKind {
         match self {
             Self::Terrain(terrain) => terrain.spoken_name(),
             Self::Landmark => "Landmark",
-            Self::Player => "Player position",
+            Self::Player(Some(terrain)) => terrain.spoken_name(),
+            Self::Player(None) => "Player position",
             Self::Unseen => "Unseen",
         }
     }
@@ -222,7 +246,7 @@ impl CellKind {
         match self {
             Self::Terrain(terrain) => terrain.cue_id(),
             Self::Landmark => "landmark",
-            Self::Player => "player",
+            Self::Player(_) => "player",
             Self::Unseen => "unseen",
         }
     }

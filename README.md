@@ -34,14 +34,32 @@ The cursor starts on the player whenever a map arrives.
 
 - Arrow keys move north, east, south, and west without wrapping.
 - Space returns to the player, including feedback when already centered.
+- With Num Lock on, numpad 8, 9, 6, 3, 2, 1, 4, and 7 move north,
+  northeast, east, southeast, south, southwest, west, and northwest.
+- Numpad 5 returns to the player, and numpad 0 reads the map dimensions.
+- Enter or numeric-keypad Enter reads the terrain under the exploration cursor.
+- D reads the map dimensions as columns by rows.
+- Ctrl+Space switches focus back to the paired Mudlet window.
 - Ctrl+, opens Preferences.
 - Alt+F4 or File > Exit closes LamentMapper.
 - Help > View guide opens this guide from beside the executable.
 
-Terrain is announced before position. With directions enabled, an example is
-"Dense forest, 3 east, 2 north." Horizontal displacement is announced before
-vertical displacement. The player is announced as "Player position, center,"
-blank cells as "Unseen," and both landmark symbols as "Landmark."
+Terrain is announced before position. Roads also include their visible connections
+in all eight compass directions, for example "Road, east-west" or
+"Road, northeast-southwest." A road, player,
+or landmark cell with at least three road connections is announced as a crossroads,
+for example "Crossroads, east, south, west." Connections are always announced
+clockwise as north, northeast, east, southeast, south, southwest, west, northwest.
+With directions enabled, cursor displacement follows
+the topology, as in "Road, east-west, 3 north." Horizontal displacement is announced
+before vertical displacement. When the center token identifies its terrain uniquely,
+the player is announced as, for example, "Dense forest (player's position)," and
+the terrain and player sounds play together. Ambiguous center tokens use "Player
+position, center" and the player sound only. Blank cells are "Unseen," and both
+landmark symbols are "Landmark."
+
+Enter and D always use Prism speech, even in Sounds mode, and never play terrain
+or notification sounds. Enter includes road topology but omits cursor displacement.
 
 The visual grid is excluded from the Windows accessibility tree and has no native
 selection cursor. Its keyboard-focus host exposes no grid children or synthetic
@@ -50,6 +68,10 @@ window-focus and map-navigation speech and braille come from Prism.
 
 Receiving a map never activates LamentMapper or takes focus from Mudlet. The
 new map replaces the old one immediately and resets the exploration cursor.
+
+In Mudlet, Ctrl+Space focuses an already-running managed LamentMapper without
+starting an idle one. In LamentMapper, Ctrl+Space restores and focuses the Mudlet
+window belonging to the process that launched it.
 
 ## Preferences and configuration
 

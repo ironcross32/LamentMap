@@ -183,7 +183,7 @@ pub fn validate(message: MapMessage) -> Result<Map, ProtocolError> {
             let start = column * 2;
             let token = &row[start..start + 2];
             let kind = if (row_index, column) == (size / 2, size / 2) {
-                CellKind::Player
+                CellKind::Player(Terrain::from_player_token(token))
             } else if token == "  " {
                 CellKind::Unseen
             } else if is_landmark_token(token) {
@@ -258,7 +258,29 @@ mod tests {
         input.rows[2].replace_range(5..6, "*");
         let map = validate(input).unwrap();
         assert_eq!(map.cells.len(), 25);
-        assert_eq!(map.cell(2, 2).unwrap().kind, CellKind::Player);
+        assert_eq!(map.cell(2, 2).unwrap().kind, CellKind::Player(None));
+    }
+
+    #[test]
+    fn infers_only_unambiguous_player_terrain() {
+        let map = validate(message(3)).unwrap();
+        assert_eq!(
+            map.cell(1, 1).unwrap().kind,
+            CellKind::Player(Some(Terrain::Plains))
+        );
+
+        let mut dense_forest = message(3);
+        dense_forest.rows[1].replace_range(2..4, "T*");
+        let map = validate(dense_forest).unwrap();
+        assert_eq!(
+            map.cell(1, 1).unwrap().kind,
+            CellKind::Player(Some(Terrain::DenseForests))
+        );
+
+        let mut ambiguous = message(3);
+        ambiguous.rows[1].replace_range(2..4, "s*");
+        let map = validate(ambiguous).unwrap();
+        assert_eq!(map.cell(1, 1).unwrap().kind, CellKind::Player(None));
     }
 
     #[test]
