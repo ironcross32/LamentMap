@@ -27,6 +27,11 @@ Automatic updates extract over the application directory without deleting
 user-owned files, so the existing `config.toml` is preserved. In that file,
 `mode = "speech"` intentionally disables terrain sounds.
 
+Map-rejection warnings are disabled by default so messages such as skill-improve
+notices are not mistaken for user-facing mapper failures. Run
+`lamentmapper debug` to toggle these diagnostics during troubleshooting. The
+current state is included in `lamentmapper status`.
+
 Press Ctrl+Space in Mudlet to focus the managed LamentMapper window when it is
 already running. The key reports an unavailable window without launching the mapper.
 

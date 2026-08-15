@@ -281,6 +281,11 @@ mod tests {
         ambiguous.rows[1].replace_range(2..4, "s*");
         let map = validate(ambiguous).unwrap();
         assert_eq!(map.cell(1, 1).unwrap().kind, CellKind::Player(None));
+
+        let mut reversed_swamp_or_light_fungus = message(3);
+        reversed_swamp_or_light_fungus.rows[1].replace_range(2..4, "f*");
+        let map = validate(reversed_swamp_or_light_fungus).unwrap();
+        assert_eq!(map.cell(1, 1).unwrap().kind, CellKind::Player(None));
     }
 
     #[test]
@@ -304,6 +309,27 @@ mod tests {
         let map = validate(input).unwrap();
         assert_eq!(map.cell(3, 6).unwrap().token, "#T");
         assert_eq!(map.cell(3, 6).unwrap().kind, CellKind::Landmark);
+    }
+
+    #[test]
+    fn accepts_reversed_swamp_tokens_from_live_nine_by_nine_map() {
+        let mut input = message(9);
+        input.rows = vec![
+            "        \"\"        ".into(),
+            "    fsfs\"\"tt\"\"    ".into(),
+            "  sf  tt\"\"tttt==  ".into(),
+            "  ttttTT\"\"tt\"\"==  ".into(),
+            "TTtt----T*\"\"==\"\"\"\"".into(),
+            "  tttt--TTfs==\"\"  ".into(),
+            "  TTtt        tt  ".into(),
+            "                  ".into(),
+            "                  ".into(),
+        ];
+        let map = validate(input).unwrap();
+        assert_eq!(map.cell(1, 2).unwrap().token, "fs");
+        assert_eq!(map.cell(1, 2).unwrap().kind, CellKind::Terrain(Terrain::Swamps));
+        assert_eq!(map.cell(2, 1).unwrap().token, "sf");
+        assert_eq!(map.cell(2, 1).unwrap().kind, CellKind::Terrain(Terrain::Swamps));
     }
 
     #[test]

@@ -38,6 +38,10 @@ the Mudlet-managed child process is running. If the application is closed, the
 next valid map starts it again. Closing the profile or uninstalling the package
 closes the managed process.
 
+Map-rejection diagnostics are silent by default so unrelated game messages are
+not reported as mapper errors. Run `lamentmapper debug` to toggle those
+diagnostics while investigating capture problems; run it again to disable them.
+
 ## Exploring a map
 
 The cursor starts on the player whenever a map arrives.

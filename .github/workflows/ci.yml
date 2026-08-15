@@ -67,6 +67,10 @@ jobs:
           if ($null -eq $setupAlias -or $setupAlias.regex -cne $expectedSetupRegex) {
             throw "LamentMapper setup alias does not accept exactly the optional manual/auto mode"
           }
+          $debugAlias = $aliases | Where-Object name -EQ "LamentMapper debug"
+          if ($null -eq $debugAlias -or $debugAlias.regex -cne '^lamentmapper\s+debug\s*$') {
+            throw "LamentMapper debug alias is missing or accepts unexpected arguments"
+          }
       - name: Build Mudlet package
         working-directory: accessible_lament_map
         run: java -jar ../.ci/muddler/build/libs/muddle-1.1.0-all.jar
@@ -88,6 +92,7 @@ jobs:
             @{ XPath = "//Script[name='LamentMapper']/script"; Marker = "lamentMapper.initialize()" },
             @{ XPath = "//Alias[name='LamentMapper setup']/script"; Marker = "lamentMapper.setup(matches[2])" },
             @{ XPath = "//Alias[name='LamentMapper status']/script"; Marker = "lamentMapper.status()" },
+            @{ XPath = "//Alias[name='LamentMapper debug']/script"; Marker = "lamentMapper.toggleDebug()" },
             @{ XPath = "//Trigger[name='LamentMapper prompt boundary']/script"; Marker = "lamentMapper.onPrompt()" },
             @{ XPath = "//Key[name='LamentMapper focus']/script"; Marker = "lamentMapper.focusMapper()" }
           )

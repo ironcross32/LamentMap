@@ -82,7 +82,7 @@ impl Terrain {
             "V-" => Self::Badlands,
             "/\\" => Self::Mountains,
             "MM" => Self::HighMountains,
-            "sf" => Self::Swamps,
+            "sf" | "fs" => Self::Swamps,
             "ss" => Self::Marshes,
             "--" => Self::Lakes,
             ".." => Self::Deserts,
@@ -119,9 +119,8 @@ impl Terrain {
             b"~*" => Self::Rivers,
             b"i*" => Self::IceFields,
             b"=*" => Self::Road,
-            b"f*" => Self::LightFungus,
             b"F*" => Self::DenseFungus,
-            // s*, .*, and x* each match multiple terrain tokens.
+            // s*, f*, .*, and x* each match multiple terrain tokens.
             _ => return None,
         })
     }

@@ -45,6 +45,7 @@ end
 
 equal(lamentMapper.packageVersion, "1.1.0", "package diagnostic version")
 equal(lamentMapper.packageName, "Accessible-Lament-Map", "canonical package name")
+equal(lamentMapper.DEBUG, false, "debug diagnostics default to disabled")
 equal(handlerNumber, 8, "registered lifecycle and setup handlers")
 equal(type(handlers.sysInstallPackage), "function", "install handler")
 equal(type(handlers.sysDownloadDone), "function", "download completion handler")
@@ -177,6 +178,16 @@ do
   dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_setup.lua")
   equal(dispatchedMode, "manual", "manual alias dispatch")
   lamentMapper.setup = originalSetup
+end
+
+do
+  lamentMapper.DEBUG = false
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_debug.lua")
+  equal(lamentMapper.DEBUG, true, "debug alias enables rejection diagnostics")
+  equal(echoed[#echoed], "<cyan>LamentMapper debug diagnostics enabled.\n", "debug enabled output")
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_debug.lua")
+  equal(lamentMapper.DEBUG, false, "debug alias disables rejection diagnostics")
+  equal(echoed[#echoed], "<cyan>LamentMapper debug diagnostics disabled.\n", "debug disabled output")
 end
 
 do
@@ -471,6 +482,25 @@ do
   local rows, first = lamentMapper.findMap(lines)
   equal(first, 2, "fatigue-prefixed response first map row")
   equal(#rows, 3, "fatigue-prefixed response size")
+end
+
+do
+  local rows = {
+    '        ""        ',
+    '    fsfs""tt""    ',
+    '  sf  tt""tttt==  ',
+    '  ttttTT""tt""==  ',
+    'TTtt----T*""==""""',
+    '  tttt--TTfs==""  ',
+    '  TTtt        tt  ',
+    '                  ',
+    '                  ',
+  }
+  local captured, first = lamentMapper.findMap(rows)
+  equal(first, 1, "live swamp log first row")
+  equal(#captured, 9, "live swamp log map captured")
+  equal(lamentMapper.validateRows(captured), true, "live swamp log accepts sf and fs tokens")
+  equal(captured[2]:sub(5, 6), "fs", "reversed swamp token retained")
 end
 
 do
@@ -780,11 +810,12 @@ end
 
 do
   local response = {
+    "*** Your swamp lore skill improves. ***",
     "Your current surroundings are heavily wooded forest, and you can see up to six leagues away from here.",
     "You see no points of interest nearby.",
   }
   getLastLineNumber = function(_)
-    return 3
+    return 4
   end
   getLines = function(_, first, last)
     local result = {}
@@ -796,6 +827,7 @@ do
   lamentMapper.responseStart = 1
   lamentMapper.lastObservedLine = 0
   lamentMapper.warnedSurveyWithoutMap = false
+  lamentMapper.DEBUG = false
   local before = #echoed
   lamentMapper.onPrompt()
   equal(
@@ -803,7 +835,18 @@ do
     "Wilderness map rejected: no line contained exactly one player marker",
     "survey-without-grid status"
   )
-  equal(#echoed, before + 1, "survey-without-grid warning")
+  equal(#echoed, before, "survey rejection warning suppressed outside debug mode")
+
+  lamentMapper.responseStart = 1
+  lamentMapper.lastObservedLine = 0
+  lamentMapper.warnedSurveyWithoutMap = false
+  lamentMapper.DEBUG = true
+  before = #echoed
+  lamentMapper.onPrompt()
+  equal(#echoed, before + 1, "survey rejection warning shown in debug mode")
+  equal(echoed[#echoed]:find("rejected the grid", 1, true) ~= nil, true,
+      "debug rejection warning is specific")
+  lamentMapper.DEBUG = false
 end
 
 do
@@ -961,6 +1004,7 @@ do
   equal(lamentMapper.setupOperation, nil, "script reload discards stale setup state")
   equal(lamentMapper.sequence, 0, "script reload resets transport sequence")
   equal(lamentMapper.promptCount, 0, "script reload resets diagnostics")
+  equal(lamentMapper.DEBUG, false, "script reload resets debug diagnostics")
   equal(#lamentMapper.eventHandlers, 8, "fresh table registers its own handlers")
 
   os.remove = originalRemove

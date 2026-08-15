@@ -37,6 +37,7 @@ lamentMapper.eventHandlers = {}
 lamentMapper.setupOperation = nil
 lamentMapper.setupSequence = 0
 lamentMapper.legacyRemovalInProgress = false
+lamentMapper.DEBUG = false
 lamentMapper.warnedMissing = false
 lamentMapper.promptCount = 0
 lamentMapper.mapsSent = 0
@@ -70,6 +71,7 @@ lamentMapper.validTokens = {
   ["/\\"] = true,
   ["MM"] = true,
   ["sf"] = true,
+  ["fs"] = true,
   ["ss"] = true,
   ["--"] = true,
   [".."] = true,
@@ -533,6 +535,7 @@ function lamentMapper.status()
   cecho("<cyan>Accessible Lament Map package: " .. lamentMapper.packageVersion .. "\n")
   cecho("<cyan>LamentMapper path: " .. configured .. "\n")
   cecho("<cyan>Automatic setup: " .. setupStage .. "\n")
+  cecho("<cyan>Debug diagnostics: " .. (lamentMapper.DEBUG and "enabled" or "disabled") .. "\n")
   cecho("<cyan>LamentMapper managed process: " .. processState .. "\n")
   cecho("<cyan>Prompt boundaries observed: " .. tostring(lamentMapper.promptCount) .. "\n")
   cecho("<cyan>Maps transmitted: " .. tostring(lamentMapper.mapsSent) .. "\n")
@@ -540,6 +543,16 @@ function lamentMapper.status()
   if pathState == "usable" and processState ~= "running" then
     cecho("<yellow>Close any manually launched LamentMapper window. Mudlet must launch the application to provide its map stream.\n")
   end
+end
+
+function lamentMapper.toggleDebug()
+  lamentMapper.DEBUG = not lamentMapper.DEBUG
+  if lamentMapper.DEBUG then
+    lamentMapper.warnedSurveyWithoutMap = false
+  end
+  cecho("<cyan>LamentMapper debug diagnostics "
+      .. (lamentMapper.DEBUG and "enabled" or "disabled") .. ".\n")
+  return lamentMapper.DEBUG
 end
 
 function lamentMapper.ensureProcess()
@@ -839,7 +852,7 @@ function lamentMapper.onPrompt()
     end
     if sawSurveyText then
       lamentMapper.lastCaptureStatus = "Wilderness map rejected: " .. tostring(rejectionReason)
-      if not lamentMapper.warnedSurveyWithoutMap then
+      if lamentMapper.DEBUG and not lamentMapper.warnedSurveyWithoutMap then
         cecho("<yellow>LamentMapper saw wilderness survey output but rejected the grid: "
             .. tostring(rejectionReason) .. ". Run 'lamentmapper status' to repeat this diagnostic.\n")
         lamentMapper.warnedSurveyWithoutMap = true

@@ -6,5 +6,9 @@
   {
     "name": "LamentMapper status",
     "regex": "^lamentmapper\\s+status\\s*$"
+  },
+  {
+    "name": "LamentMapper debug",
+    "regex": "^lamentmapper\\s+debug\\s*$"
   }
 ]
