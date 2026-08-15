@@ -18,9 +18,16 @@ supported in this release.
 
 ## Setup
 
-1. Import `Accessible-Lament-Map.mpackage` into the desired Mudlet profile.
-2. In that profile, enter `lamentmapper setup auto`.
-3. Select the parent folder that should contain the new `LamentMapper` folder.
+The easiest way to get going is to install the package directly in Mudlet like this:
+
+```lua
+lua uninstallPackage"Accessible-Lament-Map";installPackage"https://github.com/ironcross32/LamentMap/releases/latest/download/Accessible-Lament-Map.mpackage"
+```
+
+Once downloaded, it'll prompt you what to do next. The easiest method is automatic setup, which works as follows:
+1. Type `lamentmapper setup auto
+2. Select the folder where the app will be extracted Note: the folder you select will be the parent folder that will contain the LamentMapper folder
+3. The app will be downloaded to a tempoerary location, and the archive will be extracted to the location you specified
 
 Automatic setup requires Windows x64 and Mudlet 4.6 or newer. It downloads the
 latest Windows x64 release over HTTPS, creates or reuses a `LamentMapper`
@@ -33,14 +40,7 @@ For manual setup, download and extract the latest Windows x64 release ZIP, enter
 `lamentmapper setup manual`, and select the extracted `LamentMapper.exe`.
 The original `lamentmapper setup` command remains an alias for manual setup.
 
-Use `lamentmapper status` to report the normalized executable path and whether
-the Mudlet-managed child process is running. If the application is closed, the
-next valid map starts it again. Closing the profile or uninstalling the package
-closes the managed process.
-
-Map-rejection diagnostics are silent by default so unrelated game messages are
-not reported as mapper errors. Run `lamentmapper debug` to toggle those
-diagnostics while investigating capture problems; run it again to disable them.
+Use `lamentmapper status` to check if things are working properly. Use `lamentmapper debug` to toggle extra messages on or off which might be helpful if things aren't working as intended.
 
 ## Exploring a map
 
