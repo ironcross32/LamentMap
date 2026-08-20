@@ -76,6 +76,12 @@ jobs:
           $package = "mudlet-package/Accessible-Lament-Map.mpackage"
           if (-not (Test-Path -LiteralPath $package -PathType Leaf)) { throw "Downloaded Mudlet package was not found: $package" }
           ./scripts/package-release.ps1 -MudletPackage $package
+      - name: Generate and validate update manifest
+        shell: pwsh
+        run: |
+          $package = "mudlet-package/Accessible-Lament-Map.mpackage"
+          ./scripts/update-manifest.ps1 -ReleaseTag $env:GITHUB_REF_NAME -MudletPackage $package -ApplicationArchive "dist/LamentMapper-windows-x64.zip"
+          ./scripts/update-manifest.ps1 -ReleaseTag $env:GITHUB_REF_NAME -MudletPackage $package -ApplicationArchive "dist/LamentMapper-windows-x64.zip" -ValidateOnly
       - uses: actions/upload-artifact@v4
         with:
           name: LamentMapper-windows-x64
@@ -93,3 +99,4 @@ jobs:
             $package
           )
           gh release create $env:GITHUB_REF_NAME @assets --generate-notes --verify-tag
+          gh release upload $env:GITHUB_REF_NAME "dist/update-manifest.json" --clobber

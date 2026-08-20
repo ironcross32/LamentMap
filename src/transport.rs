@@ -1,6 +1,7 @@
 use crate::protocol::MAX_INPUT_LINE_BYTES;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
-use std::io::{BufRead, BufReader, Read};
+use serde::Serialize;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::thread::{self, JoinHandle};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +14,61 @@ pub enum TransportEvent {
 pub struct InputTransport {
     receiver: Receiver<TransportEvent>,
     _thread: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+pub enum OutboundMessage {
+    #[serde(rename = "move")]
+    Move {
+        protocol_version: u32,
+        directions: Vec<String>,
+    },
+    #[serde(rename = "cancel_move")]
+    CancelMove { protocol_version: u32 },
+}
+
+impl OutboundMessage {
+    pub fn movement(directions: Vec<String>) -> Self {
+        Self::Move {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            directions,
+        }
+    }
+
+    pub const fn cancellation() -> Self {
+        Self::CancelMove {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+        }
+    }
+}
+
+pub struct OutputTransport<W> {
+    writer: W,
+}
+
+impl<W: Write> OutputTransport<W> {
+    pub const fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn send(&mut self, message: &OutboundMessage) -> io::Result<()> {
+        let encoded = serde_json::to_vec(message).map_err(io::Error::other)?;
+        if encoded.len() > MAX_INPUT_LINE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "output line exceeds 1 MiB",
+            ));
+        }
+        self.writer.write_all(&encoded)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()
+    }
+
+    #[cfg(test)]
+    fn into_inner(self) -> W {
+        self.writer
+    }
 }
 
 impl InputTransport {
@@ -114,6 +170,64 @@ mod tests {
     use std::io;
     use std::io::Cursor;
     use std::time::Duration;
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+        fail_writes: bool,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_writes {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frames_and_flushes_movement_and_cancellation_messages() {
+        let mut transport = OutputTransport::new(RecordingWriter::default());
+        transport
+            .send(&OutboundMessage::movement(vec![
+                "northeast".into(),
+                "east".into(),
+            ]))
+            .unwrap();
+        transport.send(&OutboundMessage::cancellation()).unwrap();
+        let writer = transport.into_inner();
+        let lines = String::from_utf8(writer.bytes).unwrap();
+        assert_eq!(
+            lines,
+            "{\"type\":\"move\",\"protocol_version\":1,\"directions\":[\"northeast\",\"east\"]}\n\
+             {\"type\":\"cancel_move\",\"protocol_version\":1}\n"
+        );
+        assert_eq!(writer.flushes, 2);
+    }
+
+    #[test]
+    fn rejects_oversized_output_and_surfaces_write_failures() {
+        let oversized = OutboundMessage::movement(vec!["x".repeat(MAX_INPUT_LINE_BYTES)]);
+        let mut transport = OutputTransport::new(RecordingWriter::default());
+        let error = transport.send(&oversized).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(transport.into_inner().bytes.is_empty());
+
+        let mut transport = OutputTransport::new(RecordingWriter {
+            fail_writes: true,
+            ..RecordingWriter::default()
+        });
+        let error = transport.send(&OutboundMessage::cancellation()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
 
     #[test]
     fn reads_partial_and_multiple_lines_then_eof() {

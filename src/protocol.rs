@@ -200,6 +200,7 @@ pub fn validate(message: MapMessage) -> Result<Map, ProtocolError> {
             cells.push(Cell {
                 token: token.to_owned(),
                 kind,
+                dynamic_terrain_description: None,
                 styles: [
                     expanded_styles[row_index][start],
                     expanded_styles[row_index][start + 1],
@@ -208,12 +209,14 @@ pub fn validate(message: MapMessage) -> Result<Map, ProtocolError> {
         }
     }
 
-    Ok(Map {
+    let mut map = Map {
         size,
         cells,
         captured_at: message.captured_at,
         sequence: message.sequence,
-    })
+    };
+    map.assign_dynamic_terrain_descriptions();
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -286,6 +289,27 @@ mod tests {
         reversed_swamp_or_light_fungus.rows[1].replace_range(2..4, "f*");
         let map = validate(reversed_swamp_or_light_fungus).unwrap();
         assert_eq!(map.cell(1, 1).unwrap().kind, CellKind::Player(None));
+    }
+
+    #[test]
+    fn map_construction_assigns_dynamic_descriptions_without_changing_cells() {
+        let mut input = message(3);
+        input.rows[1].replace_range(4..6, "x~");
+        let map = validate(input).unwrap();
+        let player = map.cell(1, 1).unwrap();
+
+        assert_eq!(player.token, "\"*");
+        assert_eq!(player.kind, CellKind::Player(Some(Terrain::Plains)));
+        assert_eq!(
+            player.dynamic_terrain_description,
+            Some(crate::model::DynamicTerrainDescription::Riverbank)
+        );
+        assert_eq!(player.spoken_name(true), "Riverbank");
+        assert_eq!(player.spoken_name(false), "Plains");
+        assert_eq!(
+            map.cell(1, 2).unwrap().kind,
+            CellKind::Terrain(Terrain::WastedRivers)
+        );
     }
 
     #[test]

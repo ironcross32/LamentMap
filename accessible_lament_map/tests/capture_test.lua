@@ -43,9 +43,10 @@ local function equal(actual, expected, label)
   end
 end
 
-equal(lamentMapper.packageVersion, "1.1.0", "package diagnostic version")
+equal(lamentMapper.packageVersion, "1.2.0", "package diagnostic version")
 equal(lamentMapper.packageName, "Accessible-Lament-Map", "canonical package name")
 equal(lamentMapper.DEBUG, false, "debug diagnostics default to disabled")
+equal(lamentMapper.enabled, true, "map capture defaults to enabled")
 equal(handlerNumber, 8, "registered lifecycle and setup handlers")
 equal(type(handlers.sysInstallPackage), "function", "install handler")
 equal(type(handlers.sysDownloadDone), "function", "download completion handler")
@@ -188,6 +189,67 @@ do
   dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_debug.lua")
   equal(lamentMapper.DEBUG, false, "debug alias disables rejection diagnostics")
   equal(echoed[#echoed], "<cyan>LamentMapper debug diagnostics disabled.\n", "debug disabled output")
+end
+
+do
+  local originalGetLastLineNumber = getLastLineNumber
+  local processClosed = false
+  local helperClosed = false
+  local promptCount = lamentMapper.promptCount
+
+  lamentMapper.process = {
+    close = function()
+      processClosed = true
+    end,
+  }
+  lamentMapper.focusHelper = {
+    close = function()
+      helperClosed = true
+    end,
+  }
+  lamentMapper.automaticSurvey = { candidates = {} }
+  lamentMapper.responseStart = 10
+  lamentMapper.lastObservedLine = 20
+  getLastLineNumber = function(_)
+    error("disabled capture must not inspect the buffer")
+  end
+
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_toggle.lua")
+  equal(lamentMapper.enabled, false, "toggle alias disables map capture")
+  equal(processClosed, true, "disabling closes the managed mapper")
+  equal(helperClosed, true, "disabling closes the focus helper")
+  equal(lamentMapper.process, nil, "disabling clears the managed process")
+  equal(lamentMapper.automaticSurvey, nil, "disabling clears an in-flight automatic survey")
+  equal(lamentMapper.responseStart, nil, "disabling clears prompt capture state")
+  equal(lamentMapper.lastObservedLine, nil, "disabling clears the observed buffer position")
+  equal(lamentMapper.lastCaptureStatus, "Map capture disabled", "disabled capture status")
+  equal(lamentMapper.onRoomEntry(), false, "disabled room entry does not start automatic capture")
+  equal(lamentMapper.onAutomaticSurveyLine('"""*'), false, "disabled automatic line is ignored")
+  lamentMapper.onPrompt()
+  equal(lamentMapper.promptCount, promptCount, "disabled prompt does not run buffer capture")
+  local sentWhileDisabled, disabledStatus = lamentMapper.sendMap({}, {})
+  equal(sentWhileDisabled, false, "disabled direct map send is rejected")
+  equal(disabledStatus, "Map capture is disabled", "disabled direct map status")
+  equal(
+    echoed[#echoed],
+    "<cyan>LamentMapper activity disabled; map capture stopped and the mapper closed.\n",
+    "disabled toggle output"
+  )
+
+  getLastLineNumber = function(_)
+    return 17
+  end
+  dofile("accessible_lament_map/src/aliases/Accessible Lament Map/LamentMapper_toggle.lua")
+  equal(lamentMapper.enabled, true, "second toggle reenables map capture")
+  equal(lamentMapper.process, nil, "reenabling does not open the mapper")
+  equal(lamentMapper.responseStart, 18, "reenabling starts with fresh prompt capture state")
+  equal(
+    echoed[#echoed],
+    "<cyan>LamentMapper activity enabled; the mapper will open after the next valid map.\n",
+    "enabled toggle output"
+  )
+
+  getLastLineNumber = originalGetLastLineNumber
 end
 
 do
@@ -367,7 +429,7 @@ do
   )
   equal(
     echoed[#echoed],
-    "<green>You can start using LamentMapper now. It will open automatically when Mudlet receives the next valid ASCII wilderness grid.\n",
+    "<green>You can start using LamentMapper now. It will open automatically after the next completed wilderness room entry.\n",
     "automatic setup announces readiness"
   )
 
@@ -539,6 +601,14 @@ do
   local rows = lamentMapper.findMap(lines)
   equal(rows[1], "      ", "console-padding suffix removed")
   equal(rows[2], '"""*  ', "padded center row normalized")
+  local aligned = lamentMapper.alignLineStyles({{
+    start = 0,
+    length = 8,
+    foreground = { r = 7, g = 8, b = 9 },
+    background = { r = 1, g = 2, b = 3 },
+  }}, 8, 6)
+  equal(#aligned, 1, "truncated automatic row retains one color run")
+  equal(aligned[1].length, 6, "automatic row color run truncated to normalized width")
 end
 
 do
@@ -605,11 +675,13 @@ do
   local originalValidateExecutablePath = lamentMapper.validateExecutablePath
   local spawnCount = 0
   local spawnedPath = nil
+  local spawnedCallback = nil
   local sentPayload = nil
 
   yajl = { to_string = function(_) return "{}" end }
-  spawn = function(_, path)
+  spawn = function(callback, path)
     spawnCount = spawnCount + 1
+    spawnedCallback = callback
     spawnedPath = path
     return {
       isRunning = function()
@@ -630,6 +702,7 @@ do
   equal(lamentMapper.sendMap(validThree(), {}), true, "valid map launches configured executable")
   equal(spawnCount, 1, "valid map launch count")
   equal(spawnedPath, lamentMapper.executablePath, "valid map launched configured path")
+  equal(spawnedCallback, lamentMapper.onProcessOutput, "managed process output callback")
   equal(sentPayload, "{}\n", "valid map sent after process launch")
 
   yajl = originalYajl
@@ -675,6 +748,7 @@ do
   equal(echoed[statusStart + 2]:find("invalid or unreadable", 1, true) ~= nil, true,
       "status distinguishes an invalid executable")
   equal(echoed[statusStart + 3], "<cyan>Automatic setup: extracting\n", "status reports setup stage")
+  equal(echoed[statusStart + 4], "<cyan>Map capture: enabled\n", "status reports capture activity")
 
   lamentMapper.executablePath = nil
   lamentMapper.setupOperation = nil
@@ -850,6 +924,351 @@ do
 end
 
 do
+  local originalSend = send
+  local originalDeleteLine = deleteLine
+  local originalCaptureLineStyles = lamentMapper.captureLineStyles
+  local originalCaptureStyles = lamentMapper.captureStyles
+  local originalSendMap = lamentMapper.sendMap
+  local originalGetLastLineNumber = getLastLineNumber
+  local originalGetLines = getLines
+  local originalLine = line
+  local commands = {}
+  local deleted = {}
+  local events = {}
+  local maps = {}
+  local promptLine = 40
+
+  send = function(command, echoCommand)
+    commands[#commands + 1] = {
+      command = command,
+      echoCommand = echoCommand,
+    }
+  end
+  deleteLine = function()
+    deleted[#deleted + 1] = line
+    events[#events + 1] = "delete:" .. tostring(line)
+  end
+  lamentMapper.captureLineStyles = function(text)
+    events[#events + 1] = "capture:" .. text
+    if #text == 0 then
+      return {}
+    end
+    return {{
+      start = 0,
+      length = #text,
+      foreground = { r = 12, g = 34, b = 56 },
+      background = { r = 1, g = 2, b = 3 },
+    }}
+  end
+  lamentMapper.captureStyles = function(rows, _, _)
+    local styles = {}
+    for _, row in ipairs(rows) do
+      styles[#styles + 1] = {{
+        start = 0,
+        length = #row,
+        foreground = { r = 90, g = 80, b = 70 },
+        background = { r = 0, g = 0, b = 0 },
+      }}
+    end
+    return styles
+  end
+  lamentMapper.sendMap = function(rows, styles)
+    maps[#maps + 1] = {
+      rows = rows,
+      styles = styles,
+    }
+    return true, "Map transmitted successfully"
+  end
+  getLastLineNumber = function(_)
+    return promptLine
+  end
+
+  local function receive(text)
+    line = text
+    if text:find("Your current surroundings are ", 1, true) == 1 then
+      dofile("accessible_lament_map/src/triggers/Accessible Lament Map/LamentMapper_room_entry.lua")
+    end
+    dofile("accessible_lament_map/src/triggers/Accessible Lament Map/LamentMapper_automatic_survey_line.lua")
+  end
+
+  local departures = {
+    "You begin walking north.",
+    "You begin running south while carrying a fallen branch.",
+    "You sprint east, dragging a corpse behind you.",
+    "You limp west.",
+    "You go northwest.",
+    "You approach the old trail, then stop.",
+    "You halt your movement.",
+    "You stop dragging the fallen branch.",
+  }
+  for _, departure in ipairs(departures) do
+    receive(departure)
+  end
+  equal(#commands, 0, "departure, pace, burden, go, approach, and halt lines do not survey early")
+
+  receive("Your current surroundings are scrubland, and the border lies immediately behind you.")
+  equal(#commands, 1, "instant border crossing surroundings line requests one survey")
+  equal(commands[1].command, "survey leagues", "automatic survey command")
+  equal(commands[1].echoCommand, false, "automatic survey command echo disabled")
+
+  receive("")
+  receive("A nightjar calls somewhere nearby.")
+  receive("Mist")
+  receive('"""*')
+  receive("")
+  receive("You can see up to six leagues away from here.")
+  equal(#maps, 1, "automatic sparse grid produces exactly one map payload")
+  equal(maps[1].rows[1], "      ", "automatic sparse outer row padded")
+  equal(maps[1].rows[2], '"""*  ', "automatic sparse center row padded")
+  equal(maps[1].styles[2][1].foreground.r, 12, "automatic grid foreground color retained")
+  equal(maps[1].styles[2][1].background.b, 3, "automatic grid background color retained")
+  equal(maps[1].styles[2][2].start, 4, "automatic sparse style padding aligned")
+  equal(maps[1].styles[2][2].length, 2, "automatic sparse style padding width")
+  equal(#deleted, 4, "automatic grid rows and visibility sentence gagged")
+  equal(deleted[1], "", "automatic blank grid row gagged")
+  equal(deleted[2], '"""*', "automatic center grid row gagged")
+  equal(deleted[3], "", "automatic final grid row gagged")
+  equal(deleted[4], "You can see up to six leagues away from here.", "automatic terminator gagged")
+  equal(lamentMapper.isPotentialMapRow("Mist"), false, "map-like ambient word is not a recognized grid row")
+  equal(events[1], "capture:", "automatic row captured before deletion")
+  equal(events[2], "delete:", "automatic row deleted after capture")
+  equal(lamentMapper.lastCaptureStatus, "Map transmitted successfully", "automatic capture status")
+
+  local statusBeforePrompt = lamentMapper.lastCaptureStatus
+  lamentMapper.onPrompt()
+  equal(lamentMapper.automaticSurvey, nil, "prompt clears completed automatic survey state")
+  equal(lamentMapper.lastCaptureStatus, statusBeforePrompt, "consumed prompt preserves automatic result")
+  equal(#maps, 1, "consumed automatic prompt does not run ordinary capture")
+
+  receive("Your current surroundings are open grassland.")
+  receive("Your current surroundings are open grassland.")
+  receive("Your current surroundings are open grassland.")
+  equal(#commands, 2, "overlapping surroundings notifications do not send immediately")
+  receive(validThree()[1])
+  receive(validThree()[2])
+  receive(validThree()[3])
+  receive("You can see up to three leagues away from here.")
+  equal(#maps, 2, "first coalesced automatic survey transmitted once")
+  lamentMapper.onPrompt()
+  equal(#commands, 3, "overlapping entries coalesce into one follow-up survey")
+  equal(lamentMapper.automaticSurvey ~= nil, true, "follow-up survey starts after consumed prompt")
+
+  receive(validThree()[1])
+  receive('""**""')
+  receive(validThree()[3])
+  local deletedBeforeMalformedTerminator = #deleted
+  receive("You can see up to three leagues away from here.")
+  equal(#maps, 2, "malformed automatic grid is not transmitted")
+  equal(#deleted, deletedBeforeMalformedTerminator + 1, "malformed automatic terminator still gagged")
+  equal(
+    lamentMapper.lastCaptureStatus:find("Automatic wilderness map rejected", 1, true) == 1,
+    true,
+    "malformed automatic grid has rejection status"
+  )
+  lamentMapper.onPrompt()
+  equal(lamentMapper.automaticSurvey, nil, "prompt clears malformed completed survey")
+
+  receive("Your current surroundings are dense forest.")
+  receive(validThree()[1])
+  lamentMapper.onPrompt()
+  equal(lamentMapper.automaticSurvey, nil, "missing automatic terminator resets at prompt")
+  equal(
+    lamentMapper.lastCaptureStatus,
+    "Automatic survey ended before its visibility sentence",
+    "missing automatic terminator status"
+  )
+
+  receive("Your current surroundings are a riverbank.")
+  equal(lamentMapper.automaticSurvey ~= nil, true, "automatic survey active before buffer shrink")
+  handlers.sysBufferShrinkEvent("sysBufferShrinkEvent", "main")
+  equal(lamentMapper.automaticSurvey, nil, "buffer shrink clears incomplete automatic survey")
+
+  local manualRows = validThree()
+  local deletedBeforeManual = #deleted
+  for _, row in ipairs(manualRows) do
+    receive(row)
+  end
+  receive("You can see up to three leagues away from here.")
+  equal(#deleted, deletedBeforeManual, "manual survey output remains visible")
+  getLines = function(_, first, last)
+    local response = {
+      manualRows[1],
+      manualRows[2],
+      manualRows[3],
+      "You can see up to three leagues away from here.",
+    }
+    local result = {}
+    for lineNumber = first, last do
+      result[#result + 1] = response[lineNumber]
+    end
+    return result
+  end
+  promptLine = 5
+  lamentMapper.responseStart = 1
+  lamentMapper.lastObservedLine = 0
+  lamentMapper.onPrompt()
+  equal(#maps, 3, "manual survey remains prompt-captured")
+
+  send = originalSend
+  deleteLine = originalDeleteLine
+  lamentMapper.captureLineStyles = originalCaptureLineStyles
+  lamentMapper.captureStyles = originalCaptureStyles
+  lamentMapper.sendMap = originalSendMap
+  getLastLineNumber = originalGetLastLineNumber
+  getLines = originalGetLines
+  line = originalLine
+  lamentMapper.resetAutomaticSurvey()
+end
+
+do
+  local originalYajl = yajl
+  local originalSend = send
+  local originalTempTimer = tempTimer
+  local originalKillTimer = killTimer
+  local originalStartAutomaticSurvey = lamentMapper.startAutomaticSurvey
+  local originalProcess = lamentMapper.process
+  local timers = {}
+  local delays = {}
+  local killed = {}
+  local commands = {}
+  local nextTimer = 0
+  local surveyRequests = 0
+  local moveTwo = [[{"protocol_version":1,"type":"move","directions":["north","east"]}]]
+  local moveSouth = [[{"protocol_version":1,"type":"move","directions":["south"]}]]
+  local cancel = [[{"protocol_version":1,"type":"cancel_move"}]]
+  local badDirection = [[{"protocol_version":1,"type":"move","directions":["up"]}]]
+  local badVersion = [[{"protocol_version":2,"type":"cancel_move"}]]
+  local badType = [[{"protocol_version":1,"type":"dance"}]]
+  local decoded = {
+    [moveTwo] = { protocol_version = 1, type = "move", directions = { "north", "east" } },
+    [moveSouth] = { protocol_version = 1, type = "move", directions = { "south" } },
+    [cancel] = { protocol_version = 1, type = "cancel_move" },
+    [badDirection] = { protocol_version = 1, type = "move", directions = { "up" } },
+    [badVersion] = { protocol_version = 2, type = "cancel_move" },
+    [badType] = { protocol_version = 1, type = "dance" },
+  }
+
+  yajl = {
+    to_value = function(text)
+      if not decoded[text] then
+        error("malformed JSON")
+      end
+      return decoded[text]
+    end,
+  }
+  send = function(command, echoCommand)
+    commands[#commands + 1] = { command = command, echoCommand = echoCommand }
+  end
+  tempTimer = function(delay, callback)
+    nextTimer = nextTimer + 1
+    delays[nextTimer] = delay
+    timers[nextTimer] = callback
+    return nextTimer
+  end
+  killTimer = function(timerId)
+    killed[timerId] = true
+    timers[timerId] = nil
+  end
+  local function fire(timerId)
+    local callback = timers[timerId]
+    timers[timerId] = nil
+    if callback and not killed[timerId] then
+      callback()
+    end
+  end
+  lamentMapper.startAutomaticSurvey = function()
+    surveyRequests = surveyRequests + 1
+    lamentMapper.automaticSurvey = { candidates = {}, complete = false, followUp = false }
+    return true
+  end
+  lamentMapper.resetAutomaticSurvey()
+  lamentMapper.cancelAutomaticMovement(false)
+  lamentMapper.resetProcessOutput()
+
+  local split = 23
+  lamentMapper.onProcessOutput(moveTwo:sub(1, split))
+  equal(lamentMapper.automaticMovement, nil, "partial process output waits for newline")
+  lamentMapper.onProcessOutput(moveTwo:sub(split + 1) .. "\n")
+  equal(lamentMapper.automaticMovement ~= nil, true, "split movement message accepted")
+  equal(#commands, 0, "accepted route waits for its initial timer")
+  equal(delays[1] >= 0.5 and delays[1] <= 1.5, true, "initial movement delay is bounded")
+
+  local beforeReject = #echoed
+  lamentMapper.onProcessOutput(moveSouth .. "\n{" .. "\n")
+  equal(#echoed, beforeReject + 2, "combined callback rejects active route and malformed line")
+  equal(echoed[beforeReject + 1]:find("already active", 1, true) ~= nil, true,
+      "active route rejection is reported in Mudlet")
+
+  fire(1)
+  equal(#commands, 1, "initial timer sends exactly one direction")
+  equal(commands[1].command, "north", "first route direction")
+  equal(commands[1].echoCommand, false, "automatic movement command echo disabled")
+  equal(lamentMapper.automaticMovement.timer, nil, "route stalls without room confirmation")
+
+  lamentMapper.onRoomEntry()
+  equal(surveyRequests, 1, "room entry still starts automatic survey")
+  equal(lamentMapper.automaticSurvey ~= nil, true, "room entry arms automatic map suppression")
+  lamentMapper.resetAutomaticSurvey()
+  equal(delays[2] >= 0.5 and delays[2] <= 1.5, true, "confirmed movement delay is bounded")
+  equal(#commands, 1, "confirmation schedules rather than directly resuming")
+  fire(2)
+  equal(#commands, 2, "room confirmation permits one additional direction")
+  equal(commands[2].command, "east", "second route direction")
+  equal(lamentMapper.automaticMovement ~= nil, true, "final direction waits for destination confirmation")
+  equal(lamentMapper.automaticMovement.awaitingFinalArrival, true, "final direction records pending arrival")
+  equal(lamentMapper.scheduleAutomaticMovement(), false, "pending final arrival cannot schedule another command")
+
+  local beforeComplete = #echoed
+  lamentMapper.onRoomEntry()
+  equal(lamentMapper.automaticMovement, nil, "destination confirmation clears movement state")
+  equal(#commands, 2, "destination confirmation sends no extra direction")
+  equal(surveyRequests, 2, "destination room still starts its automatic survey")
+  equal(#echoed, beforeComplete + 1, "destination confirmation announces completion")
+  equal(lamentMapper.automaticSurvey ~= nil, true, "destination map suppression remains armed")
+  equal(echoed[#echoed], "<green>Automatic movement complete.\n", "movement completion status")
+
+  lamentMapper.onProcessOutput(moveSouth .. "\n" .. cancel .. "\n")
+  equal(killed[3], true, "Escape cancellation kills the pending timer")
+  equal(lamentMapper.automaticMovement, nil, "Escape cancellation drops the coroutine")
+  equal(echoed[#echoed], "<cyan>Automatic movement canceled.\n", "cancellation status")
+  lamentMapper.onProcessOutput(cancel .. "\n")
+  equal(echoed[#echoed], "<cyan>No automatic movement is active.\n", "idle cancellation status")
+
+  local allDirections = {
+    "north", "northeast", "east", "southeast",
+    "south", "southwest", "west", "northwest",
+  }
+  local validated = lamentMapper.validateMovementDirections(allDirections)
+  equal(#validated, 8, "all eight direction names are valid")
+  local invalid = lamentMapper.validateMovementDirections({ "north", "up" })
+  equal(invalid, nil, "unknown direction is rejected")
+
+  local beforeInvalid = #echoed
+  lamentMapper.onProcessOutput(badDirection .. "\n" .. badVersion .. "\n" .. badType .. "\n")
+  equal(#echoed, beforeInvalid + 3, "invalid direction, version, and type are reported")
+  lamentMapper.onProcessOutput(string.rep("x", lamentMapper.maxMessageBytes + 1)
+      .. "\n" .. moveSouth .. "\n")
+  equal(echoed[#echoed]:find("exceeds 1 MiB", 1, true) ~= nil, true,
+      "oversized process message is rejected")
+  equal(lamentMapper.automaticMovement ~= nil, true, "parser recovers after oversized line")
+
+  lamentMapper.process = { close = function() end }
+  local pendingTimer = lamentMapper.automaticMovement.timer
+  lamentMapper.closeProcess()
+  equal(killed[pendingTimer], true, "process shutdown kills movement timer")
+  equal(lamentMapper.automaticMovement, nil, "process shutdown clears movement state")
+  equal(lamentMapper.processOutputBuffer, "", "process shutdown clears partial output")
+
+  yajl = originalYajl
+  send = originalSend
+  tempTimer = originalTempTimer
+  killTimer = originalKillTimer
+  lamentMapper.startAutomaticSurvey = originalStartAutomaticSurvey
+  lamentMapper.process = originalProcess
+  lamentMapper.resetAutomaticSurvey()
+end
+
+do
   local originalProcess = lamentMapper.process
   local originalPath = lamentMapper.executablePath
   local originalLoadPath = lamentMapper.loadExecutablePath
@@ -950,18 +1369,165 @@ do
 end
 
 do
+  equal(lamentMapper.compareSemVer("1.2.3", "1.2.2"), 1, "SemVer patch ordering")
+  equal(lamentMapper.compareSemVer("1.2.3", "2.0.0"), -1, "SemVer major ordering")
+  equal(lamentMapper.compareSemVer("1.2.3", "1.2.3"), 0, "SemVer equality")
+  equal(lamentMapper.compareSemVer("1.02.3", "1.2.3"), nil, "SemVer rejects leading zeroes")
+  equal(lamentMapper.compareSemVer("1.2.3-beta", "1.2.3"), nil, "SemVer rejects prereleases")
+
+  lamentMapper.automaticUpdateChecks = true
+  lamentMapper.lastSuccessfulUpdateCheck = 1000
+  equal(lamentMapper.updateCheckDue(1000 + 24 * 60 * 60 - 1), false, "daily check waits 24 hours")
+  equal(lamentMapper.updateCheckDue(1000 + 24 * 60 * 60), true, "daily check runs at 24 hours")
+  lamentMapper.automaticUpdateChecks = false
+  equal(lamentMapper.updateCheckDue(1000 + 48 * 60 * 60), false, "opt out suppresses checks")
+  lamentMapper.automaticUpdateChecks = true
+
+  equal(
+    lamentMapper.sha256("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "Lua 5.1 SHA-256 known vector"
+  )
+
+  local validManifest = {
+    schema_version = 1,
+    release_tag = "v9.8.7",
+    release_url = "https://github.com/ironcross32/LamentMap/releases/tag/v9.8.7",
+    mudlet = {
+      version = "1.3.0",
+      asset = {
+        url = "https://github.com/ironcross32/LamentMap/releases/download/v9.8.7/Accessible-Lament-Map.mpackage",
+        size = 7,
+        sha256 = string.rep("a", 64),
+      },
+    },
+  }
+  local update = lamentMapper.validateUpdateManifest(validManifest)
+  equal(update.version, "1.3.0", "valid manifest yields Mudlet update")
+  validManifest.mudlet.asset.url = "https://example.invalid/Accessible-Lament-Map.mpackage"
+  equal(lamentMapper.validateUpdateManifest(validManifest), nil, "foreign asset host rejected")
+  validManifest.mudlet.asset.url =
+      "https://github.com/ironcross32/LamentMap/releases/download/v9.8.7/wrong.mpackage"
+  equal(lamentMapper.validateUpdateManifest(validManifest), nil, "unexpected asset name rejected")
+  validManifest.mudlet.asset.url =
+      "https://github.com/ironcross32/LamentMap/releases/download/v9.8.7/Accessible-Lament-Map.mpackage"
+  validManifest.release_tag = "v9.8.7-beta"
+  equal(lamentMapper.validateUpdateManifest(validManifest), nil, "prerelease tag rejected")
+end
+
+do
+  local originalOpen = io.open
   local originalRemove = os.remove
-  local removedPath = nil
+  local originalInstallPackage = installPackage
+  local packageData = "package"
+  local packagePath = "./update-test.mpackage"
+  local installedPath = nil
+  local removed = {}
+
+  io.open = function(path, mode)
+    if lamentMapper.samePath(path, packagePath) and mode == "rb" then
+      return {
+        read = function() return packageData end,
+        close = function() end,
+      }
+    end
+    return nil, "unexpected file"
+  end
+  os.remove = function(path)
+    removed[lamentMapper.normalizePath(path)] = true
+    return true
+  end
+  installPackage = function(path)
+    installedPath = path
+    return true
+  end
+
+  lamentMapper.updateOperation = {
+    stage = "package",
+    packagePath = packagePath,
+    update = {
+      version = "1.3.0",
+      size = #packageData,
+      sha256 = lamentMapper.sha256(packageData),
+      releaseUrl = "https://github.com/ironcross32/LamentMap/releases/tag/v9.8.7",
+    },
+  }
+  handlers.sysDownloadDone("sysDownloadDone", "./unrelated.mpackage")
+  equal(lamentMapper.updateOperation.stage, "package", "unrelated download event ignored by updater")
+  handlers.sysDownloadDone("sysDownloadDone", packagePath)
+  equal(installedPath, packagePath, "verified local package passed to installPackage")
+  equal(lamentMapper.updateOperation.stage, "installing", "updater awaits package installation event")
+  handlers.sysInstallPackage("sysInstallPackage", lamentMapper.packageName)
+  equal(lamentMapper.updateOperation, nil, "successful installation clears updater state")
+  equal(removed[packagePath], true, "successful installation removes temporary package")
+
+  lamentMapper.updateOperation = {
+    stage = "package",
+    packagePath = packagePath,
+    update = {
+      version = "1.3.0",
+      size = #packageData,
+      sha256 = string.rep("0", 64),
+      releaseUrl = "https://github.com/ironcross32/LamentMap/releases/tag/v9.8.7",
+    },
+  }
+  installedPath = nil
+  handlers.sysDownloadDone("sysDownloadDone", packagePath)
+  equal(installedPath, nil, "hash mismatch never invokes installPackage")
+  equal(lamentMapper.updateOperation, nil, "hash mismatch clears updater state")
+
+  lamentMapper.updateOperation = {
+    stage = "package",
+    packagePath = packagePath,
+    update = {
+      version = "1.3.0",
+      size = #packageData,
+      sha256 = lamentMapper.sha256(packageData),
+      releaseUrl = "https://github.com/ironcross32/LamentMap/releases/tag/v9.8.7",
+    },
+  }
+  installPackage = function()
+    return nil, "installation denied"
+  end
+  handlers.sysDownloadDone("sysDownloadDone", packagePath)
+  equal(lamentMapper.updateOperation, nil, "installPackage error clears updater state")
+  equal(echoed[#echoed - 1]:find("installation denied", 1, true) ~= nil, true,
+      "installPackage error is reported")
+
+  io.open = originalOpen
+  os.remove = originalRemove
+  installPackage = originalInstallPackage
+end
+
+do
+  local originalRemove = os.remove
+  local removed = {}
   lamentMapper.setupOperation = {
     archivePath = [[C:\Temp\lamentmapper-exit.zip]],
     stage = "downloading",
   }
+  lamentMapper.updateOperation = {
+    manifestPath = [[C:\Temp\uninstall-manifest.json]],
+    packagePath = [[C:\Temp\uninstall-package.mpackage]],
+    stage = "package",
+  }
   os.remove = function(path)
-    removedPath = path
+    removed[lamentMapper.normalizePath(path)] = true
     return true
   end
+  lamentMapper.automaticSurvey = { candidates = {} }
+  lamentMapper.automaticMovement = {
+    coroutine = coroutine.create(function() end),
+  }
   handlers.sysExitEvent("sysExitEvent")
-  equal(removedPath, [[C:/Temp/lamentmapper-exit.zip]], "profile exit removes canonical temporary archive")
+  equal(removed["C:/Temp/lamentmapper-exit.zip"], true,
+      "profile exit removes canonical temporary archive")
+  equal(removed["C:/Temp/uninstall-manifest.json"], true,
+      "profile exit removes temporary update manifest")
+  equal(removed["C:/Temp/uninstall-package.mpackage"], true,
+      "profile exit removes temporary update package")
+  equal(lamentMapper.automaticSurvey, nil, "profile exit clears automatic survey state")
+  equal(lamentMapper.automaticMovement, nil, "profile exit clears automatic movement state")
   os.remove = originalRemove
 end
 equal(#lamentMapper.eventHandlers, 0, "profile exit handler cleanup")
@@ -973,10 +1539,12 @@ do
   local oldTable = lamentMapper
   local originalRemove = os.remove
   local originalKill = killAnonymousEventHandler
+  local originalKillTimer = killTimer
   local processClosed = false
   local helperClosed = false
   local removed = {}
   local killed = {}
+  local movementTimerKilled = false
 
   oldTable.process = { close = function() processClosed = true end }
   oldTable.focusHelper = { close = function() helperClosed = true end }
@@ -986,12 +1554,22 @@ do
   }
   oldTable.sequence = 99
   oldTable.promptCount = 88
+  oldTable.automaticSurvey = { candidates = { "stale" } }
+  oldTable.automaticMovement = {
+    coroutine = coroutine.create(function() coroutine.yield() end),
+    timer = 777,
+  }
   os.remove = function(path)
     removed[#removed + 1] = path
     return true
   end
   killAnonymousEventHandler = function(handlerId)
     killed[#killed + 1] = handlerId
+  end
+  killTimer = function(timerId)
+    if timerId == 777 then
+      movementTimerKilled = true
+    end
   end
 
   dofile("accessible_lament_map/src/scripts/Accessible Lament Map/LamentMapper.lua")
@@ -1004,17 +1582,57 @@ do
   equal(lamentMapper.setupOperation, nil, "script reload discards stale setup state")
   equal(lamentMapper.sequence, 0, "script reload resets transport sequence")
   equal(lamentMapper.promptCount, 0, "script reload resets diagnostics")
+  equal(lamentMapper.automaticSurvey, nil, "script reload discards stale automatic survey state")
+  equal(movementTimerKilled, true, "script reload kills stale automatic movement timer")
+  equal(lamentMapper.automaticMovement, nil, "script reload discards stale automatic movement state")
   equal(lamentMapper.DEBUG, false, "script reload resets debug diagnostics")
   equal(#lamentMapper.eventHandlers, 8, "fresh table registers its own handlers")
 
   os.remove = originalRemove
   killAnonymousEventHandler = originalKill
+  killTimer = originalKillTimer
+end
+
+do
+  local originalReadExecutablePath = lamentMapper.readExecutablePath
+  local originalPath = lamentMapper.executablePath
+
+  lamentMapper.executablePath = nil
+  lamentMapper.readExecutablePath = function()
+    return [[C:/Existing/LamentMapper.exe]], "usable"
+  end
+  handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
+  equal(lamentMapper.executablePath, [[C:/Existing/LamentMapper.exe]],
+      "package update reuses a valid saved executable")
+  equal(
+    echoed[#echoed],
+    "<green>Accessible Lament Map installed. Reusing the configured executable: "
+        .. [[C:/Existing/LamentMapper.exe]] .. "\n",
+    "package update announces saved executable reuse"
+  )
+
+  lamentMapper.executablePath = nil
+  lamentMapper.readExecutablePath = function()
+    return [[C:/Missing/LamentMapper.exe]], "invalid", "simulated missing file"
+  end
+  handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
+  equal(
+    echoed[#echoed]:find("Configured LamentMapper executable is invalid or unreadable", 1, true) ~= nil,
+    true,
+    "package update rejects an invalid saved executable"
+  )
+  equal(echoed[#echoed]:find("lamentmapper setup auto", 1, true) ~= nil, true,
+      "invalid saved executable receives setup guidance")
+
+  lamentMapper.readExecutablePath = originalReadExecutablePath
+  lamentMapper.executablePath = originalPath
 end
 
 do
   local originalGetPackages = getPackages
   local originalUninstallPackage = uninstallPackage
   local originalRemove = os.remove
+  local originalValidateExecutablePath = lamentMapper.validateExecutablePath
   local packages = { "Accessible Lament Map", "Accessible-Lament-Map" }
   local uninstalled = nil
   local removed = {}
@@ -1032,43 +1650,59 @@ do
     removed[#removed + 1] = path
     return true
   end
-  lamentMapper.executablePath = [[C:/Obsolete/LamentMapper.exe]]
+  lamentMapper.executablePath = [[C:/Existing/LamentMapper.exe]]
+  lamentMapper.validateExecutablePath = function(_)
+    return true
+  end
 
   handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
   equal(uninstalled, "Accessible Lament Map", "hyphenated install removes legacy package")
   equal(type(lamentMapper), "table", "legacy uninstall event leaves new package active")
-  equal(lamentMapper.executablePath, nil, "migration discards obsolete executable path")
-  equal(removed[1], "./accessible-lament-map-executable.txt", "migration deletes new path state")
-  equal(removed[2], "./lamentmapper-executable.txt", "migration deletes legacy path state")
-  equal(echoed[#echoed]:find("fresh setup", 1, true) ~= nil, true,
-      "migration requires one fresh setup")
+  equal(lamentMapper.executablePath, [[C:/Existing/LamentMapper.exe]],
+      "migration preserves the canonical executable path")
+  equal(removed[1], "./lamentmapper-executable.txt", "migration deletes only legacy path state")
+  equal(removed[2], nil, "migration does not delete canonical path state")
+  equal(echoed[#echoed]:find("Reusing the configured executable", 1, true) ~= nil, true,
+      "migration announces canonical path reuse")
 
   packages = { "Accessible Lament Map", "Accessible-Lament-Map" }
   uninstallPackage = function(_)
     return false
   end
   handlers.sysInstallPackage("sysInstallPackage", "Accessible-Lament-Map")
-  equal(echoed[#echoed - 3]:find("could not remove the legacy package", 1, true) ~= nil, true,
+  equal(echoed[#echoed - 1]:find("could not remove the legacy package", 1, true) ~= nil, true,
       "failed legacy removal emits a clear warning")
 
   getPackages = originalGetPackages
   uninstallPackage = originalUninstallPackage
   os.remove = originalRemove
+  lamentMapper.validateExecutablePath = originalValidateExecutablePath
 end
 
 do
   local originalRemove = os.remove
   local originalKill = killAnonymousEventHandler
+  local originalKillTimer = killTimer
   local processClosed = false
   local helperClosed = false
   local removed = {}
   local killed = {}
+  local movementTimerKilled = false
 
   lamentMapper.process = { close = function() processClosed = true end }
   lamentMapper.focusHelper = { close = function() helperClosed = true end }
   lamentMapper.setupOperation = {
     archivePath = [[C:\Temp\uninstall-setup.zip]],
     stage = "downloading",
+  }
+  lamentMapper.updateOperation = {
+    manifestPath = [[C:\Temp\uninstall-manifest.json]],
+    packagePath = [[C:\Temp\uninstall-package.mpackage]],
+    stage = "package",
+  }
+  lamentMapper.automaticMovement = {
+    coroutine = coroutine.create(function() coroutine.yield() end),
+    timer = 888,
   }
   os.remove = function(path)
     removed[path] = true
@@ -1077,18 +1711,28 @@ do
   killAnonymousEventHandler = function(handlerId)
     killed[#killed + 1] = handlerId
   end
+  killTimer = function(timerId)
+    if timerId == 888 then
+      movementTimerKilled = true
+    end
+  end
 
   handlers.sysUninstallPackage("sysUninstallPackage", "Accessible-Lament-Map")
   equal(processClosed, true, "uninstall closes the managed process")
   equal(helperClosed, true, "uninstall closes the focus helper")
+  equal(movementTimerKilled, true, "uninstall kills automatic movement timer")
   equal(#killed, 8, "uninstall unregisters every anonymous handler")
   equal(removed["C:/Temp/uninstall-setup.zip"], true, "uninstall removes setup archive")
-  equal(removed["./accessible-lament-map-executable.txt"], true, "uninstall deletes new path file")
-  equal(removed["./lamentmapper-executable.txt"], true, "uninstall deletes legacy path file")
+  equal(removed["C:/Temp/uninstall-manifest.json"], true, "uninstall removes update manifest")
+  equal(removed["C:/Temp/uninstall-package.mpackage"], true, "uninstall removes update package")
+  equal(removed["./accessible-lament-map-executable.txt"], nil,
+      "uninstall preserves canonical executable path state")
+  equal(removed["./lamentmapper-executable.txt"], nil, "uninstall leaves path records untouched")
   equal(lamentMapper, nil, "uninstall clears the global table")
 
   os.remove = originalRemove
   killAnonymousEventHandler = originalKill
+  killTimer = originalKillTimer
 end
 
 print("Mudlet capture tests passed")

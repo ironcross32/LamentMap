@@ -3,10 +3,12 @@ pub mod config;
 pub mod feedback;
 pub mod logging;
 pub mod map_input;
+pub mod menu;
 pub mod model;
 pub mod navigation;
 pub mod prism;
 pub mod protocol;
+pub mod terrain_browser;
 pub mod transport;
 #[cfg(windows)]
 pub mod window_focus;

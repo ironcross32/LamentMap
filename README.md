@@ -40,7 +40,11 @@ For manual setup, download and extract the latest Windows x64 release ZIP, enter
 `lamentmapper setup manual`, and select the extracted `LamentMapper.exe`.
 The original `lamentmapper setup` command remains an alias for manual setup.
 
-Use `lamentmapper status` to check if things are working properly. Use `lamentmapper debug` to toggle extra messages on or off which might be helpful if things aren't working as intended.
+Use `lamentmapper status` to check if things are working properly. Use
+`lamentmapper debug` to toggle extra messages on or off which might be helpful if
+things aren't working as intended. `lamentmapper toggle` disables all map capture
+and closes the mapper; run it again to resume capture. The mapper stays closed
+until the next valid map is captured.
 
 ## Exploring a map
 
@@ -51,8 +55,18 @@ The cursor starts on the player whenever a map arrives.
 - With Num Lock on, numpad keys move in their corresponding directions:
 - Numpad 5 returns to the player, and numpad 0 reads the map dimensions.
 - Enter or numeric-keypad Enter reads the terrain under the exploration cursor.
+- T opens the terrain-types menu. Use Up and Down to browse, Home and End to
+  jump to either end, Page Up and Page Down to move by about ten percent, and
+  Left and Right to adjust an item when a menu offers multiple values. The
+  terrain menu wraps from either end. Press Enter or numeric-keypad Enter to
+  choose a terrain, or Escape to close the menu without moving the cursor.
 - D reads the map dimensions as columns by rows.
-- Ctrl+Space switches focus back to the paired Mudlet window.
+- H reads the cursor's direction from the player. Press H again within 0.5 seconds
+  to hear the alternate cardinal-only or diagonal-aware directions.
+- M requests automatic movement from the player to the selected non-player tile.
+- Escape cancels a pending or active automatic movement route.
+- Ctrl+Space switches focus back to the paired Mudlet window. It can optionally
+  hide LamentMapper after the switch succeeds.
 - Ctrl+, opens Preferences.
 - Alt+F4 or File > Exit closes LamentMapper.
 - Help > View guide opens this guide from beside the executable.
@@ -63,14 +77,53 @@ in all eight compass directions, for example "Road, east-west" or
 or landmark cell with at least three road connections is announced as a crossroads,
 for example "Crossroads, east, south, west." Connections are always announced
 clockwise as north, northeast, east, southeast, south, southwest, west, northwest.
-With directions enabled, you hear how many units away in each direction the cell is from your position.
+With directions enabled, you hear how many units away in each direction the cell
+is from your position. The optional shortest-path setting uses diagonal steps
+first, so a position 3 east and 2 north is announced as "2 northeast, 1 east"
+instead of "3 east, 2 north." H reads only this relative direction regardless of
+whether automatic direction announcements are enabled.
 
-CTRL+SPACE will flip-flop between Mudlet and the map viewer as long as at least one valid map has been received to start it. You should allow Mudlet to start the mapper rather than doing so yourself, because this establishes a parent - child relationship where Mudlet is the parent, and the mapper is the parent. This allows the switch to work properly.
+The terrain-types menu lists only terrain present on the current map, with a
+tile count for each type; unseen cells appear last. Choosing an entry moves the
+exploration cursor to the closest matching tile using eight-way distance. If
+several tiles are equally close, the first one in row-by-row map order is used.
+The map host keeps keyboard focus while this virtual menu is open.
+
+By default, "Dynamic terrain descriptions" gives eligible plains and forests
+more specific spoken names based on all eight neighboring cells. Plains beside
+a river are announced as "Riverbank," and plains beside an ocean as "Seashore."
+Forests beside a river, lake, or mountain are announced as "Wooded riverbank,"
+"Forested lakeside," or "Forested mountainside." River takes priority over ocean
+for plains; river, lake, then mountain is the priority order for forests. These
+names affect speech and braille terrain text only: map glyphs, colors, terrain
+sounds, roads, and automatic movement are unchanged.
+
+Automatic movement uses the cursor's coordinate displacement; it does not inspect
+terrain, roads, or obstacles. The shortest eight-way route always sends diagonal
+steps first, regardless of the direction-announcement preference. Mudlet waits a
+random 0.5 to 1.5 seconds before each command, sends the full direction name with
+command echo disabled, and will not schedule the next direction until Lament's
+existing room-entry message confirms arrival. If that confirmation never arrives,
+movement waits indefinitely. Mudlet rejects a new route while one is active and
+reports the rejection; Escape cancels the pending timer and route. LamentMapper's
+own confirmation means only that the request reached Mudlet, not that Mudlet
+accepted it.
+
+Ctrl+Space switches between Mudlet and the map viewer as long as Mudlet launched
+the mapper. This is a shortcut managed by Mudlet and LamentMapper, not a
+system-wide hotkey. If "Hide mapper window when switching to Mudlet" is enabled,
+switching from LamentMapper to its paired Mudlet window with Ctrl+Space, Alt+Tab,
+or the mouse hides the mapper so it no longer appears in Alt+Tab. Press Ctrl+Space
+in Mudlet to restore and focus the hidden mapper. With the preference disabled,
+switching to Mudlet leaves LamentMapper visible in Alt+Tab.
 
 ## Preferences and configuration
 
-Preferences offers Speech, Speech and sounds, or Sounds, plus direction and
-new-map-alert checkboxes. Settings are stored as `config.toml` beside the
+Preferences offers Speech, Speech and sounds, or Sounds, plus automatic-direction,
+shortest-path diagonal, dynamic-terrain-description, new-map-alert, and optional
+mapper-hiding checkboxes. "Dynamic terrain descriptions" is on by default;
+diagonal directions and mapper hiding are off by default. Settings are stored as
+`config.toml` beside the
 executable. Missing known settings receive defaults. If the file contains an
 unsupported version, unknown setting, or invalid value, LamentMapper renames it
 to the next available `config.toml.bak`, `.bak.1`, and so on, then writes clean

@@ -43,6 +43,27 @@ pub enum Terrain {
     WastedRivers,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicTerrainDescription {
+    Riverbank,
+    WoodedRiverbank,
+    Seashore,
+    ForestedLakeside,
+    ForestedMountainside,
+}
+
+impl DynamicTerrainDescription {
+    pub const fn spoken_name(self) -> &'static str {
+        match self {
+            Self::Riverbank => "Riverbank",
+            Self::WoodedRiverbank => "Wooded riverbank",
+            Self::Seashore => "Seashore",
+            Self::ForestedLakeside => "Forested lakeside",
+            Self::ForestedMountainside => "Forested mountainside",
+        }
+    }
+}
+
 impl Terrain {
     pub const ALL: [Self; 25] = [
         Self::Ocean,
@@ -255,7 +276,18 @@ impl CellKind {
 pub struct Cell {
     pub token: String,
     pub kind: CellKind,
+    pub dynamic_terrain_description: Option<DynamicTerrainDescription>,
     pub styles: [CharacterStyle; 2],
+}
+
+impl Cell {
+    pub const fn spoken_name(&self, dynamic_terrain_descriptions: bool) -> &'static str {
+        if dynamic_terrain_descriptions && let Some(description) = self.dynamic_terrain_description {
+            description.spoken_name()
+        } else {
+            self.kind.spoken_name()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,5 +305,346 @@ impl Map {
 
     pub fn cell(&self, row: usize, column: usize) -> Option<&Cell> {
         (row < self.size && column < self.size).then(|| &self.cells[row * self.size + column])
+    }
+
+    pub fn assign_dynamic_terrain_descriptions(&mut self) {
+        for index in 0..self.cells.len() {
+            let row = index / self.size;
+            let column = index % self.size;
+            self.cells[index].dynamic_terrain_description = dynamic_terrain_description(self, row, column);
+        }
+    }
+}
+
+fn dynamic_terrain_description(map: &Map, row: usize, column: usize) -> Option<DynamicTerrainDescription> {
+    let terrain = terrain_from_kind(map.cell(row, column)?.kind)?;
+    let adjacent_to = |matches_terrain: fn(Terrain) -> bool| {
+        (-1..=1).any(|row_offset| {
+            (-1..=1).any(|column_offset| {
+                if row_offset == 0 && column_offset == 0 {
+                    return false;
+                }
+                let Some(neighbor_row) = row.checked_add_signed(row_offset) else {
+                    return false;
+                };
+                let Some(neighbor_column) = column.checked_add_signed(column_offset) else {
+                    return false;
+                };
+                map.cell(neighbor_row, neighbor_column)
+                    .and_then(|neighbor| terrain_from_kind(neighbor.kind))
+                    .is_some_and(matches_terrain)
+            })
+        })
+    };
+
+    match terrain {
+        Terrain::Plains if adjacent_to(is_river) => Some(DynamicTerrainDescription::Riverbank),
+        Terrain::Plains if adjacent_to(is_ocean) => Some(DynamicTerrainDescription::Seashore),
+        Terrain::LightForests | Terrain::DenseForests if adjacent_to(is_river) => {
+            Some(DynamicTerrainDescription::WoodedRiverbank)
+        }
+        Terrain::LightForests | Terrain::DenseForests if adjacent_to(is_lake) => {
+            Some(DynamicTerrainDescription::ForestedLakeside)
+        }
+        Terrain::LightForests | Terrain::DenseForests if adjacent_to(is_mountain) => {
+            Some(DynamicTerrainDescription::ForestedMountainside)
+        }
+        _ => None,
+    }
+}
+
+const fn terrain_from_kind(kind: CellKind) -> Option<Terrain> {
+    match kind {
+        CellKind::Terrain(terrain) | CellKind::Player(Some(terrain)) => Some(terrain),
+        CellKind::Landmark | CellKind::Player(None) | CellKind::Unseen => None,
+    }
+}
+
+const fn is_river(terrain: Terrain) -> bool {
+    matches!(terrain, Terrain::Rivers | Terrain::WastedRivers)
+}
+
+const fn is_ocean(terrain: Terrain) -> bool {
+    matches!(terrain, Terrain::Ocean | Terrain::WastedOcean)
+}
+
+const fn is_lake(terrain: Terrain) -> bool {
+    matches!(terrain, Terrain::Lakes | Terrain::WastedLakes)
+}
+
+const fn is_mountain(terrain: Terrain) -> bool {
+    matches!(terrain, Terrain::Mountains | Terrain::HighMountains)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STYLE: CharacterStyle = CharacterStyle {
+        foreground: Rgb { r: 0, g: 0, b: 0 },
+        background: Rgb { r: 0, g: 0, b: 0 },
+    };
+
+    fn cell(kind: CellKind) -> Cell {
+        Cell {
+            token: "  ".into(),
+            kind,
+            dynamic_terrain_description: None,
+            styles: [STYLE; 2],
+        }
+    }
+
+    fn map_with_neighbors(
+        target: CellKind,
+        target_position: (usize, usize),
+        neighbors: &[((usize, usize), Terrain)],
+    ) -> Map {
+        let mut map = Map {
+            size: 3,
+            cells: vec![cell(CellKind::Unseen); 9],
+            captured_at: 0,
+            sequence: 0,
+        };
+        map.cells[target_position.0 * map.size + target_position.1].kind = target;
+        for &((row, column), terrain) in neighbors {
+            map.cells[row * map.size + column].kind = CellKind::Terrain(terrain);
+        }
+        map.assign_dynamic_terrain_descriptions();
+        map
+    }
+
+    fn center_description(
+        target: CellKind,
+        neighbors: &[((usize, usize), Terrain)],
+    ) -> Option<DynamicTerrainDescription> {
+        map_with_neighbors(target, (1, 1), neighbors)
+            .cell(1, 1)
+            .unwrap()
+            .dynamic_terrain_description
+    }
+
+    #[test]
+    fn assigns_every_rule_for_cardinal_and_diagonal_neighbors() {
+        for (target, trigger, expected) in [
+            (
+                CellKind::Terrain(Terrain::Plains),
+                Terrain::Rivers,
+                DynamicTerrainDescription::Riverbank,
+            ),
+            (
+                CellKind::Terrain(Terrain::Plains),
+                Terrain::Ocean,
+                DynamicTerrainDescription::Seashore,
+            ),
+            (
+                CellKind::Terrain(Terrain::LightForests),
+                Terrain::Rivers,
+                DynamicTerrainDescription::WoodedRiverbank,
+            ),
+            (
+                CellKind::Terrain(Terrain::DenseForests),
+                Terrain::Lakes,
+                DynamicTerrainDescription::ForestedLakeside,
+            ),
+            (
+                CellKind::Terrain(Terrain::LightForests),
+                Terrain::Mountains,
+                DynamicTerrainDescription::ForestedMountainside,
+            ),
+        ] {
+            for position in [(1, 2), (2, 2)] {
+                assert_eq!(
+                    center_description(target, &[(position, trigger)]),
+                    Some(expected),
+                    "{target:?} beside {trigger:?} at {position:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checks_only_in_bounds_neighbors_at_map_edges() {
+        for (target, trigger, expected) in [
+            (
+                Terrain::Plains,
+                Terrain::Rivers,
+                DynamicTerrainDescription::Riverbank,
+            ),
+            (
+                Terrain::Plains,
+                Terrain::Ocean,
+                DynamicTerrainDescription::Seashore,
+            ),
+            (
+                Terrain::LightForests,
+                Terrain::Rivers,
+                DynamicTerrainDescription::WoodedRiverbank,
+            ),
+            (
+                Terrain::DenseForests,
+                Terrain::Lakes,
+                DynamicTerrainDescription::ForestedLakeside,
+            ),
+            (
+                Terrain::LightForests,
+                Terrain::Mountains,
+                DynamicTerrainDescription::ForestedMountainside,
+            ),
+        ] {
+            for trigger_position in [(0, 1), (1, 1)] {
+                let map =
+                    map_with_neighbors(CellKind::Terrain(target), (0, 0), &[(trigger_position, trigger)]);
+                assert_eq!(
+                    map.cell(0, 0).unwrap().dynamic_terrain_description,
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_water_variants_mountain_heights_and_both_forest_densities() {
+        for (target, trigger, expected) in [
+            (
+                Terrain::Plains,
+                Terrain::WastedRivers,
+                DynamicTerrainDescription::Riverbank,
+            ),
+            (
+                Terrain::Plains,
+                Terrain::WastedOcean,
+                DynamicTerrainDescription::Seashore,
+            ),
+            (
+                Terrain::LightForests,
+                Terrain::WastedRivers,
+                DynamicTerrainDescription::WoodedRiverbank,
+            ),
+            (
+                Terrain::DenseForests,
+                Terrain::Rivers,
+                DynamicTerrainDescription::WoodedRiverbank,
+            ),
+            (
+                Terrain::LightForests,
+                Terrain::WastedLakes,
+                DynamicTerrainDescription::ForestedLakeside,
+            ),
+            (
+                Terrain::DenseForests,
+                Terrain::Lakes,
+                DynamicTerrainDescription::ForestedLakeside,
+            ),
+            (
+                Terrain::LightForests,
+                Terrain::HighMountains,
+                DynamicTerrainDescription::ForestedMountainside,
+            ),
+            (
+                Terrain::DenseForests,
+                Terrain::Mountains,
+                DynamicTerrainDescription::ForestedMountainside,
+            ),
+        ] {
+            assert_eq!(
+                center_description(CellKind::Terrain(target), &[((1, 2), trigger)],),
+                Some(expected),
+                "{target:?} beside {trigger:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn assigns_descriptions_to_inferred_player_terrain() {
+        for (target, trigger, expected) in [
+            (
+                Terrain::Plains,
+                Terrain::Rivers,
+                DynamicTerrainDescription::Riverbank,
+            ),
+            (
+                Terrain::LightForests,
+                Terrain::WastedLakes,
+                DynamicTerrainDescription::ForestedLakeside,
+            ),
+            (
+                Terrain::DenseForests,
+                Terrain::HighMountains,
+                DynamicTerrainDescription::ForestedMountainside,
+            ),
+        ] {
+            assert_eq!(
+                center_description(CellKind::Player(Some(target)), &[((0, 0), trigger)],),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_multiple_matches_in_documented_precedence_order() {
+        assert_eq!(
+            center_description(
+                CellKind::Terrain(Terrain::Plains),
+                &[((0, 1), Terrain::Ocean), ((1, 2), Terrain::Rivers)],
+            ),
+            Some(DynamicTerrainDescription::Riverbank)
+        );
+        assert_eq!(
+            center_description(
+                CellKind::Terrain(Terrain::DenseForests),
+                &[
+                    ((0, 1), Terrain::Mountains),
+                    ((1, 2), Terrain::Lakes),
+                    ((2, 1), Terrain::Rivers),
+                ],
+            ),
+            Some(DynamicTerrainDescription::WoodedRiverbank)
+        );
+        assert_eq!(
+            center_description(
+                CellKind::Terrain(Terrain::DenseForests),
+                &[((0, 1), Terrain::HighMountains), ((1, 2), Terrain::WastedLakes)],
+            ),
+            Some(DynamicTerrainDescription::ForestedLakeside)
+        );
+    }
+
+    #[test]
+    fn excludes_unmatched_terrain_special_forests_landmarks_and_ambiguous_players() {
+        for target in [
+            CellKind::Terrain(Terrain::Plains),
+            CellKind::Terrain(Terrain::Hills),
+            CellKind::Terrain(Terrain::WastedLightForests),
+            CellKind::Terrain(Terrain::WastedDenseForests),
+            CellKind::Terrain(Terrain::LightFungus),
+            CellKind::Terrain(Terrain::DenseFungus),
+            CellKind::Landmark,
+            CellKind::Player(None),
+            CellKind::Unseen,
+        ] {
+            assert_eq!(
+                center_description(target, &[((0, 0), Terrain::HighMountains)]),
+                None,
+                "{target:?}"
+            );
+        }
+        assert_eq!(
+            center_description(CellKind::Terrain(Terrain::LightForests), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn cell_name_selects_dynamic_or_unchanged_base_terrain() {
+        let cell = Cell {
+            token: "\"\"".into(),
+            kind: CellKind::Terrain(Terrain::Plains),
+            dynamic_terrain_description: Some(DynamicTerrainDescription::Riverbank),
+            styles: [STYLE; 2],
+        };
+        assert_eq!(cell.spoken_name(true), "Riverbank");
+        assert_eq!(cell.spoken_name(false), "Plains");
+        assert_eq!(cell.kind, CellKind::Terrain(Terrain::Plains));
+        assert_eq!(cell.token, "\"\"");
     }
 }

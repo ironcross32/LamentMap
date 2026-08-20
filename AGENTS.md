@@ -29,3 +29,7 @@ Add focused `#[test]` unit tests in each module's `tests` block. Put cross-modul
 ## Commit & Pull Request Guidelines
 
 History currently contains a single concise, imperative-style subject (`Initial LamentMapper implementation`). Continue with short subjects that describe one logical change. Pull requests should explain user-visible behavior, list validation commands, and link relevant issues. Include screenshots for visual grid/dialog changes and describe screen-reader, braille, or audio verification for accessibility changes. Never commit `config.toml`, logs, downloaded dependencies, build outputs, or private raw sound sources.
+
+## Protected Files
+
+Never modify README files in this repository. Treat `README`, `README.*`, and equivalent README-named files at any depth as read-only, even when a task would normally include documentation updates.

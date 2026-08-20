@@ -10,5 +10,13 @@
   {
     "name": "LamentMapper debug",
     "regex": "^lamentmapper\\s+debug\\s*$"
+  },
+  {
+    "name": "LamentMapper toggle",
+    "regex": "^lamentmapper\\s+toggle\\s*$"
+  },
+  {
+    "name": "LamentMapper update",
+    "regex": "^lamentmapper\\s+update(?:\\s+(check|install|on|off|status))?\\s*$"
   }
 ]

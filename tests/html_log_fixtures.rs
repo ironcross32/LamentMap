@@ -49,15 +49,15 @@ fn parses_real_thirteen_by_thirteen_diagonal_road_map() {
         CellKind::Player(Some(Terrain::Road))
     );
     assert_eq!(
-        announcement(&map, Cursor { row: 6, column: 6 }, false),
+        announcement(&map, Cursor { row: 6, column: 6 }, false, false),
         "Road, east-west."
     );
     assert_eq!(
-        announcement(&map, Cursor { row: 6, column: 7 }, false),
+        announcement(&map, Cursor { row: 6, column: 7 }, false, false),
         "Road, southeast-west."
     );
     assert_eq!(
-        announcement(&map, Cursor { row: 7, column: 8 }, false),
+        announcement(&map, Cursor { row: 7, column: 8 }, false, false),
         "Road, southeast-northwest."
     );
 }
@@ -73,7 +73,7 @@ fn parses_real_twenty_one_by_twenty_one_crossroads_map() {
     assert_eq!(map.cell(11, 10).unwrap().kind, CellKind::Terrain(Terrain::Road));
     assert_eq!(map.cell(10, 9).unwrap().kind, CellKind::Terrain(Terrain::Road));
     assert_eq!(
-        announcement(&map, cursor, false),
+        announcement(&map, cursor, false, false),
         "Crossroads, east, south, west."
     );
 }

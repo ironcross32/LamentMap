@@ -6,8 +6,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 
 const MAPPER_WINDOW_TITLE: &str = "LamentMapper";
@@ -82,9 +82,19 @@ pub fn focus_parent_window(parent_process_id: u32) -> bool {
         .is_some_and(|index| activate_window(windows[index].handle))
 }
 
+pub fn foreground_process_id() -> Option<u32> {
+    let handle = unsafe { GetForegroundWindow() };
+    if handle.is_null() {
+        return None;
+    }
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(handle, &raw mut process_id) };
+    (process_id != 0).then_some(process_id)
+}
+
 fn select_mapper_window(windows: &[NativeWindow], expected_title: &str) -> Option<usize> {
     select_candidate(windows.iter().map(|window| &window.candidate), |candidate| {
-        candidate.visible && candidate.title == expected_title
+        candidate.title == expected_title
     })
 }
 
@@ -157,13 +167,13 @@ mod tests {
     }
 
     #[test]
-    fn mapper_selection_requires_an_exact_visible_title() {
+    fn mapper_selection_requires_an_exact_title_but_allows_hidden_windows() {
         let windows = vec![
             native(10, "LamentMapper - other", true),
             native(11, "LamentMapper", false),
             native(12, "LamentMapper", true),
         ];
-        assert_eq!(select_mapper_window(&windows, MAPPER_WINDOW_TITLE), Some(2));
+        assert_eq!(select_mapper_window(&windows, MAPPER_WINDOW_TITLE), Some(1));
         assert_eq!(select_mapper_window(&windows, "lamentmapper"), None);
     }
 

@@ -1,0 +1,1 @@
+lamentMapper.onAutomaticSurveyLine(line)

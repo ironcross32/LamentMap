@@ -1,5 +1,23 @@
 [
   {
+    "name": "LamentMapper room entry",
+    "patterns": [
+      {
+        "pattern": "^Your current surroundings are ",
+        "type": "regex"
+      }
+    ]
+  },
+  {
+    "name": "LamentMapper automatic survey line",
+    "patterns": [
+      {
+        "pattern": "^.*$",
+        "type": "regex"
+      }
+    ]
+  },
+  {
     "name": "LamentMapper prompt boundary",
     "patterns": [
       {

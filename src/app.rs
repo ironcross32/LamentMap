@@ -2,22 +2,27 @@ use lament_mapper::audio::AudioEngine;
 use lament_mapper::config::{Config, ConfigRecovery, FeedbackMode, load_or_repair, save_atomic};
 use lament_mapper::feedback::{Feedback, SoundOutput, SpeechOutput};
 use lament_mapper::map_input::{
-    HostKeyAction, KeyModifiers, classify_key, dimensions_readout, terrain_readout,
+    DirectionTapTracker, HostKeyAction, KEY_ENTER, KEY_ESCAPE, KEY_NUMPAD_ENTER, KeyModifiers,
+    MovementRouteError, classify_key, classify_menu_key, dimensions_readout, direction_readout,
+    movement_route, terrain_readout,
 };
+use lament_mapper::menu::{Menu as VirtualMenu, MenuEvent};
 use lament_mapper::model::Map;
-use lament_mapper::navigation::{Cursor, MoveResult, announcement};
+use lament_mapper::navigation::{Cursor, DirectionStyle, MoveResult, announcement_with_style};
 use lament_mapper::prism::Prism;
 use lament_mapper::protocol::parse_line;
-use lament_mapper::transport::{InputTransport, TransportEvent};
+use lament_mapper::terrain_browser::{TerrainCatalog, TerrainTarget};
+use lament_mapper::transport::{InputTransport, OutboundMessage, OutputTransport, TransportEvent};
 use lament_mapper::window_focus;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
-use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
 use wxdragon::accessible::{AccRole, AccState, AccStatus, AccessibleImpl};
 use wxdragon::prelude::*;
 
@@ -27,9 +32,19 @@ const SPEECH_LABEL: &str = "Speech";
 const SPEECH_AND_SOUNDS_LABEL: &str = "Speech and sounds";
 const SOUNDS_LABEL: &str = "Sounds";
 const DIRECTIONS_LABEL: &str = "Announce directions relative to the player";
+const DIAGONAL_DIRECTIONS_LABEL: &str = "Use diagonal directions for shortest paths";
+const DYNAMIC_TERRAIN_DESCRIPTIONS_LABEL: &str = "Dynamic terrain descriptions";
 const NEW_MAP_ALERT_LABEL: &str = "Play the new-map alert";
+const HIDE_MAPPER_LABEL: &str = "Hide mapper window when switching to Mudlet";
 const OK_LABEL: &str = "OK";
 const CANCEL_LABEL: &str = "Cancel";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreferencesKeyAction {
+    Accept,
+    Cancel,
+    PassThrough,
+}
 
 struct PrismSpeech(Prism);
 
@@ -116,12 +131,16 @@ type AppFeedback = Feedback<PrismSpeech, AudioEngine>;
 struct State {
     map: Option<Map>,
     cursor: Option<Cursor>,
+    terrain_catalog: Option<TerrainCatalog>,
+    terrain_menu: Option<VirtualMenu<TerrainTarget>>,
     config: Config,
     config_path: PathBuf,
     feedback: AppFeedback,
     mudlet_process_id: Option<u32>,
+    direction_taps: DirectionTapTracker,
     last_map: Option<Instant>,
     displayed_status: String,
+    output_transport: Option<OutputTransport<Box<dyn Write>>>,
 }
 
 pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -216,6 +235,8 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             audio,
         };
         let managed_stdin = stdin_is_pipe();
+        let output_transport =
+            managed_stdin.then(|| OutputTransport::new(Box::new(std::io::stdout()) as Box<dyn Write>));
         let mudlet_process_id = managed_stdin.then(window_focus::parent_process_id).flatten();
         if let Some(process_id) = mudlet_process_id {
             log::info!("recorded managed Mudlet parent process {process_id}");
@@ -225,12 +246,16 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let state = Rc::new(RefCell::new(State {
             map: None,
             cursor: None,
+            terrain_catalog: None,
+            terrain_menu: None,
             config,
             config_path,
             feedback,
             mudlet_process_id,
+            direction_taps: DirectionTapTracker::default(),
             last_map: None,
             displayed_status: "Ready".into(),
+            output_transport,
         }));
         let transport = if managed_stdin {
             log::info!("managed stdin pipe detected");
@@ -240,7 +265,7 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             None
         };
 
-        bind_keyboard(&host, &grid, &state);
+        bind_keyboard(&frame, &host, &grid, &state);
         bind_menu(&frame, &host, &state, &runtime_dir);
         let frame_for_close = frame;
         frame.on_close(move |event| {
@@ -250,15 +275,22 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         let host_for_activate = host;
         let state_for_activate = state.clone();
         frame.on_activate(move |event| {
-            if let WindowEventData::Activate(event) = event
-                && event.is_active()
-            {
+            let WindowEventData::Activate(event) = event else {
+                return;
+            };
+            if event.is_active() {
                 host_for_activate.set_focus();
                 let mut state = state_for_activate.borrow_mut();
+                let direction_style =
+                    DirectionStyle::from_diagonal_enabled(state.config.feedback.use_diagonal_directions);
                 let phrase = match (&state.map, state.cursor) {
-                    (Some(map), Some(cursor)) => {
-                        announcement(map, cursor, state.config.feedback.announce_directions)
-                    }
+                    (Some(map), Some(cursor)) => announcement_with_style(
+                        map,
+                        cursor,
+                        state.config.feedback.announce_directions,
+                        direction_style,
+                        state.config.feedback.dynamic_terrain_descriptions,
+                    ),
                     _ => "Waiting for a wilderness map.".into(),
                 };
                 state.feedback.focus(&phrase);
@@ -266,8 +298,10 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         let timer = Box::leak(Box::new(Timer::new(&frame)));
+        let frame_for_tick = frame;
         let state_for_tick = state.clone();
         let transport_for_tick = transport.clone();
+        let mapper_was_foreground = Cell::new(false);
         timer.on_tick(move |_| {
             while let Some(transport) = &transport_for_tick {
                 match transport.try_recv() {
@@ -288,6 +322,21 @@ pub fn run(runtime_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             let mut state = state_for_tick.borrow_mut();
+            let foreground_process_id = window_focus::foreground_process_id();
+            if foreground_process_id == Some(std::process::id()) {
+                mapper_was_foreground.set(true);
+            }
+            let should_hide = should_hide_mapper_after_foreground(
+                state.config.window.hide_mapper_when_switching_to_mudlet,
+                mapper_was_foreground.get(),
+                state.mudlet_process_id,
+                foreground_process_id,
+            );
+            if should_hide {
+                hide_mapper_window(&frame_for_tick);
+                mapper_was_foreground.set(false);
+                log::info!("hid mapper after paired Mudlet became foreground");
+            }
             let updated_status = status_text(state.last_map);
             if state.displayed_status != updated_status {
                 status.set_status_text(&updated_status, 0);
@@ -365,24 +414,28 @@ fn install_menu(frame: &Frame) {
     );
 }
 
-fn bind_keyboard(host: &Panel, grid: &Grid, state: &Rc<RefCell<State>>) {
+fn bind_keyboard(frame: &Frame, host: &Panel, grid: &Grid, state: &Rc<RefCell<State>>) {
     let state = state.clone();
+    let frame = *frame;
     let grid = *grid;
     host.on_key_down(move |event| {
         let WindowEventData::Keyboard(keyboard) = &event else {
             event.skip(true);
             return;
         };
-        let key_action = classify_key(
-            keyboard.get_key_code().unwrap_or_default(),
-            KeyModifiers {
-                control: keyboard.control_down(),
-                shift: keyboard.shift_down(),
-                alt: keyboard.alt_down(),
-                meta: keyboard.meta_down(),
-            },
-        );
+        let key_code = keyboard.get_key_code().unwrap_or_default();
+        let modifiers = KeyModifiers {
+            control: keyboard.control_down(),
+            shift: keyboard.shift_down(),
+            alt: keyboard.alt_down(),
+            meta: keyboard.meta_down(),
+        };
+        let key_action = classify_key(key_code, modifiers);
+        if key_action != HostKeyAction::DirectionReadout {
+            state.borrow_mut().direction_taps.reset();
+        }
         if key_action == HostKeyAction::PassThrough {
+            state.borrow_mut().terrain_menu = None;
             event.skip(true);
             return;
         }
@@ -390,23 +443,159 @@ fn bind_keyboard(host: &Panel, grid: &Grid, state: &Rc<RefCell<State>>) {
         event.skip(false);
         grid.clear_selection();
         let mut state = state.borrow_mut();
+        if state.terrain_menu.is_some() && key_action != HostKeyAction::FocusMudlet {
+            let Some(command) = classify_menu_key(key_code, modifiers) else {
+                return;
+            };
+            let menu_event = state
+                .terrain_menu
+                .as_mut()
+                .expect("active menu checked above")
+                .handle(command);
+            match menu_event {
+                MenuEvent::Announce(phrase) => state.feedback.explicit(&phrase),
+                MenuEvent::Dismissed(phrase) => {
+                    state.terrain_menu = None;
+                    state.feedback.explicit(&phrase);
+                }
+                MenuEvent::Confirmed { payload, value: _ } => {
+                    state.terrain_menu = None;
+                    let origin = state.cursor.or_else(|| state.map.as_ref().map(Cursor::centered));
+                    let destination = origin.and_then(|origin| {
+                        state
+                            .terrain_catalog
+                            .as_ref()
+                            .and_then(|catalog| catalog.closest(payload, origin))
+                    });
+                    let (Some(cursor), Some(map)) = (destination, state.map.clone()) else {
+                        return;
+                    };
+                    let previous_cursor = state.cursor;
+                    state.cursor = Some(cursor);
+                    let cell = map
+                        .cell(cursor.row, cursor.column)
+                        .expect("catalog coordinates are valid");
+                    let phrase = announcement_with_style(
+                        &map,
+                        cursor,
+                        state.config.feedback.announce_directions,
+                        DirectionStyle::from_diagonal_enabled(state.config.feedback.use_diagonal_directions),
+                        state.config.feedback.dynamic_terrain_descriptions,
+                    );
+                    render_visual_cursor(&grid, previous_cursor, cursor);
+                    grid.make_cell_visible(cursor.row as i32, cursor.column as i32);
+                    state.feedback.navigation(MoveResult::Moved, cell.kind, &phrase);
+                }
+                MenuEvent::Ignored => {}
+            }
+            return;
+        }
         match key_action {
             HostKeyAction::Consume | HostKeyAction::PassThrough => {}
             HostKeyAction::FocusMudlet => {
+                state.terrain_menu = None;
                 let focused = state
                     .mudlet_process_id
                     .is_some_and(window_focus::focus_parent_window);
-                if !focused {
+                if should_hide_mapper(state.config.window.hide_mapper_when_switching_to_mudlet, focused) {
+                    hide_mapper_window(&frame);
+                    log::info!("hid mapper after Ctrl+Space activated paired Mudlet");
+                } else if !focused {
                     state.feedback.explicit("Mudlet window unavailable.");
                 }
             }
             HostKeyAction::TerrainReadout => {
-                let phrase = terrain_readout(state.map.as_ref(), state.cursor);
+                let phrase = terrain_readout(
+                    state.map.as_ref(),
+                    state.cursor,
+                    state.config.feedback.dynamic_terrain_descriptions,
+                );
                 state.feedback.explicit(&phrase);
+            }
+            HostKeyAction::TerrainMenu => {
+                if state.map.is_none() {
+                    state.feedback.explicit("No map available.");
+                    return;
+                }
+                let Some(catalog) = state.terrain_catalog.as_ref() else {
+                    state.feedback.explicit("No terrain types available.");
+                    return;
+                };
+                match VirtualMenu::new("Terrain types", catalog.menu_items(), true, true) {
+                    Ok(menu) => {
+                        let MenuEvent::Announce(phrase) = menu.opening_event() else {
+                            unreachable!("opening a menu always announces its title and first item");
+                        };
+                        state.terrain_menu = Some(menu);
+                        state.feedback.explicit(&phrase);
+                    }
+                    Err(error) => {
+                        log::warn!("could not open terrain menu: {error}");
+                        state.feedback.explicit("No terrain types available.");
+                    }
+                }
             }
             HostKeyAction::DimensionsReadout => {
                 let phrase = dimensions_readout(state.map.as_ref());
                 state.feedback.explicit(&phrase);
+            }
+            HostKeyAction::DirectionReadout => {
+                let preferred =
+                    DirectionStyle::from_diagonal_enabled(state.config.feedback.use_diagonal_directions);
+                let style = state.direction_taps.style_for_press(Instant::now(), preferred);
+                let phrase = direction_readout(state.map.as_ref(), state.cursor, style);
+                state.feedback.explicit(&phrase);
+            }
+            HostKeyAction::MoveRequest => {
+                if state.output_transport.is_none() {
+                    state
+                        .feedback
+                        .explicit("Automatic movement is unavailable in standalone mode.");
+                    return;
+                }
+                let route = movement_route(state.map.as_ref(), state.cursor);
+                match route {
+                    Err(MovementRouteError::NoMap) => state.feedback.explicit("No map available."),
+                    Err(MovementRouteError::PlayerPosition) => {
+                        state
+                            .feedback
+                            .explicit("Select a destination away from the player first.");
+                    }
+                    Ok(directions) => {
+                        let transport = state
+                            .output_transport
+                            .as_mut()
+                            .expect("standalone mode returned before movement routing");
+                        match transport.send(&OutboundMessage::movement(directions)) {
+                            Ok(()) => state.feedback.explicit("Automatic movement request sent."),
+                            Err(error) => {
+                                log::warn!("could not send automatic movement request: {error}");
+                                state
+                                    .feedback
+                                    .explicit("Could not send automatic movement request to Mudlet.");
+                            }
+                        }
+                    }
+                }
+            }
+            HostKeyAction::CancelMove => {
+                let Some(transport) = state.output_transport.as_mut() else {
+                    state
+                        .feedback
+                        .explicit("Automatic movement is unavailable in standalone mode.");
+                    return;
+                };
+                match transport.send(&OutboundMessage::cancellation()) {
+                    Ok(()) => state
+                        .feedback
+                        .explicit("Automatic movement cancellation request sent."),
+                    Err(error) => {
+                        log::warn!("could not send automatic movement cancellation: {error}");
+                        state
+                            .feedback
+                            .explicit("Could not send automatic movement cancellation to Mudlet.");
+                    }
+                }
             }
             HostKeyAction::Navigate(action) => {
                 let Some(map) = state.map.clone() else {
@@ -420,7 +609,13 @@ fn bind_keyboard(host: &Panel, grid: &Grid, state: &Rc<RefCell<State>>) {
                 let phrase = if result == MoveResult::Boundary {
                     "Map boundary.".to_owned()
                 } else {
-                    announcement(&map, cursor, state.config.feedback.announce_directions)
+                    announcement_with_style(
+                        &map,
+                        cursor,
+                        state.config.feedback.announce_directions,
+                        DirectionStyle::from_diagonal_enabled(state.config.feedback.use_diagonal_directions),
+                        state.config.feedback.dynamic_terrain_descriptions,
+                    )
                 };
                 render_visual_cursor(&grid, previous_cursor, cursor);
                 grid.make_cell_visible(cursor.row as i32, cursor.column as i32);
@@ -430,67 +625,137 @@ fn bind_keyboard(host: &Panel, grid: &Grid, state: &Rc<RefCell<State>>) {
     });
 }
 
+const fn should_hide_mapper(hide_preference: bool, mudlet_activated: bool) -> bool {
+    hide_preference && mudlet_activated
+}
+
+fn hide_mapper_window(frame: &Frame) {
+    let native = frame.get_handle();
+    if native.is_null() {
+        frame.show(false);
+    } else {
+        unsafe { ShowWindow(native, SW_HIDE) };
+    }
+}
+
+const fn should_hide_mapper_after_foreground(
+    hide_preference: bool,
+    mapper_was_foreground: bool,
+    mudlet_process_id: Option<u32>,
+    foreground_process_id: Option<u32>,
+) -> bool {
+    hide_preference
+        && mapper_was_foreground
+        && matches!((mudlet_process_id, foreground_process_id), (Some(mudlet), Some(foreground)) if mudlet == foreground)
+}
+
 fn bind_menu(frame: &Frame, host: &Panel, state: &Rc<RefCell<State>>, runtime_dir: &Path) {
     let state = state.clone();
     let runtime_dir = runtime_dir.to_owned();
     let frame_copy = *frame;
     let host_copy = *host;
-    frame.on_menu(move |event| match event.get_id() {
-        ID_EXIT => frame_copy.close(false),
-        MENU_README => {
-            let guide = runtime_dir.join("README.html");
-            if !guide.is_file() {
-                MessageDialog::builder(
-                    &frame_copy,
-                    "README.html was not found beside LamentMapper.exe.",
-                    "Guide unavailable",
-                )
-                .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconWarning)
-                .build()
-                .show_modal();
-            } else {
-                let target = format!("file:///{}", guide.to_string_lossy().replace('\\', "/"));
-                if !launch_default_browser(&target, BrowserLaunchFlags::NewWindow) {
-                    log::warn!("could not open bundled guide: {}", guide.display());
-                }
-            }
-            host_copy.set_focus();
+    frame.on_menu(move |event| {
+        let id = event.get_id();
+        if matches!(id, ID_EXIT | MENU_README | MENU_PREFERENCES) {
+            state.borrow_mut().terrain_menu = None;
         }
-        MENU_PREFERENCES => {
-            let (current, complete) = {
-                let state = state.borrow();
-                (state.config.clone(), state.feedback.audio.is_complete())
-            };
-            if let Some(updated) = preferences(&frame_copy, &current, complete) {
-                let mut state = state.borrow_mut();
-                match save_atomic(&state.config_path, &updated) {
-                    Ok(()) => {
-                        state.feedback.mode = updated.feedback.mode;
-                        state.config = updated;
-                        log::info!("preferences saved");
-                    }
-                    Err(error) => {
-                        log::error!("preferences could not be saved: {error}");
-                        MessageDialog::builder(
-                            &frame_copy,
-                            &format!("Preferences could not be saved:\n{error}"),
-                            "Save failed",
-                        )
-                        .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
-                        .build()
-                        .show_modal();
+        match id {
+            ID_EXIT => frame_copy.close(false),
+            MENU_README => {
+                let guide = runtime_dir.join("README.html");
+                if !guide.is_file() {
+                    MessageDialog::builder(
+                        &frame_copy,
+                        "README.html was not found beside LamentMapper.exe.",
+                        "Guide unavailable",
+                    )
+                    .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconWarning)
+                    .build()
+                    .show_modal();
+                } else {
+                    let target = format!("file:///{}", guide.to_string_lossy().replace('\\', "/"));
+                    if !launch_default_browser(&target, BrowserLaunchFlags::NewWindow) {
+                        log::warn!("could not open bundled guide: {}", guide.display());
                     }
                 }
+                host_copy.set_focus();
             }
-            host_copy.set_focus();
+            MENU_PREFERENCES => {
+                let (current, complete) = {
+                    let state = state.borrow();
+                    (state.config.clone(), state.feedback.audio.is_complete())
+                };
+                if let Some(updated) = preferences(&frame_copy, &current, complete) {
+                    let mut state = state.borrow_mut();
+                    match save_atomic(&state.config_path, &updated) {
+                        Ok(()) => {
+                            state.feedback.mode = updated.feedback.mode;
+                            state.config = updated;
+                            log::info!("preferences saved");
+                        }
+                        Err(error) => {
+                            log::error!("preferences could not be saved: {error}");
+                            MessageDialog::builder(
+                                &frame_copy,
+                                &format!("Preferences could not be saved:\n{error}"),
+                                "Save failed",
+                            )
+                            .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
+                            .build()
+                            .show_modal();
+                        }
+                    }
+                }
+                host_copy.set_focus();
+            }
+            _ => event.skip(true),
         }
-        _ => event.skip(true),
+    });
+}
+
+const fn classify_preferences_key(key_code: i32, modifiers: KeyModifiers) -> PreferencesKeyAction {
+    if modifiers.control || modifiers.shift || modifiers.alt || modifiers.meta {
+        return PreferencesKeyAction::PassThrough;
+    }
+    match key_code {
+        KEY_ENTER | KEY_NUMPAD_ENTER => PreferencesKeyAction::Accept,
+        KEY_ESCAPE => PreferencesKeyAction::Cancel,
+        _ => PreferencesKeyAction::PassThrough,
+    }
+}
+
+fn bind_preferences_keys<T: WindowEvents>(control: &T, dialog: Dialog) {
+    control.on_key_down(move |event| {
+        let WindowEventData::Keyboard(keyboard) = &event else {
+            event.skip(true);
+            return;
+        };
+        let action = classify_preferences_key(
+            keyboard.get_key_code().unwrap_or_default(),
+            KeyModifiers {
+                control: keyboard.control_down(),
+                shift: keyboard.shift_down(),
+                alt: keyboard.alt_down(),
+                meta: keyboard.meta_down(),
+            },
+        );
+        match action {
+            PreferencesKeyAction::Accept => {
+                event.skip(false);
+                dialog.end_modal(ID_OK);
+            }
+            PreferencesKeyAction::Cancel => {
+                event.skip(false);
+                dialog.end_modal(ID_CANCEL);
+            }
+            PreferencesKeyAction::PassThrough => event.skip(true),
+        }
     });
 }
 
 fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Option<Config> {
     let dialog = Dialog::builder(parent, "LamentMapper Preferences")
-        .with_size(440, 330)
+        .with_size(440, 480)
         .build();
     let group =
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &dialog, "Cursor feedback").build();
@@ -514,9 +779,21 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
         .with_label(DIRECTIONS_LABEL)
         .with_value(current.feedback.announce_directions)
         .build();
+    let diagonal_directions = CheckBox::builder(&dialog)
+        .with_label(DIAGONAL_DIRECTIONS_LABEL)
+        .with_value(current.feedback.use_diagonal_directions)
+        .build();
+    let dynamic_terrain_descriptions = CheckBox::builder(&dialog)
+        .with_label(DYNAMIC_TERRAIN_DESCRIPTIONS_LABEL)
+        .with_value(current.feedback.dynamic_terrain_descriptions)
+        .build();
     let new_map = CheckBox::builder(&dialog)
         .with_label(NEW_MAP_ALERT_LABEL)
         .with_value(current.feedback.new_map_alert)
+        .build();
+    let hide_mapper = CheckBox::builder(&dialog)
+        .with_label(HIDE_MAPPER_LABEL)
+        .with_value(current.window.hide_mapper_when_switching_to_mudlet)
         .build();
     let ok = Button::builder(&dialog)
         .with_id(ID_OK)
@@ -531,7 +808,13 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
         (&both as &dyn WxWidget, SPEECH_AND_SOUNDS_LABEL),
         (&sounds as &dyn WxWidget, SOUNDS_LABEL),
         (&directions as &dyn WxWidget, DIRECTIONS_LABEL),
+        (&diagonal_directions as &dyn WxWidget, DIAGONAL_DIRECTIONS_LABEL),
+        (
+            &dynamic_terrain_descriptions as &dyn WxWidget,
+            DYNAMIC_TERRAIN_DESCRIPTIONS_LABEL,
+        ),
         (&new_map as &dyn WxWidget, NEW_MAP_ALERT_LABEL),
+        (&hide_mapper as &dyn WxWidget, HIDE_MAPPER_LABEL),
         (&ok as &dyn WxWidget, OK_LABEL),
         (&cancel as &dyn WxWidget, CANCEL_LABEL),
     ] {
@@ -544,7 +827,10 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
     group.add(&sounds, 0, SizerFlag::All, 6);
     outer.add_sizer(&group, 0, SizerFlag::Expand | SizerFlag::All, 10);
     outer.add(&directions, 0, SizerFlag::All, 10);
+    outer.add(&diagonal_directions, 0, SizerFlag::All, 10);
+    outer.add(&dynamic_terrain_descriptions, 0, SizerFlag::All, 10);
     outer.add(&new_map, 0, SizerFlag::All, 10);
+    outer.add(&hide_mapper, 0, SizerFlag::All, 10);
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
     buttons.add_stretch_spacer(1);
     buttons.add(&ok, 0, SizerFlag::All, 6);
@@ -553,6 +839,24 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
     dialog.set_sizer(outer, true);
     dialog.set_affirmative_id(ID_OK);
     dialog.set_escape_id(ID_CANCEL);
+    ok.set_default();
+
+    for control in [&speech, &both, &sounds] {
+        bind_preferences_keys(control, dialog);
+    }
+    for control in [
+        &directions,
+        &diagonal_directions,
+        &dynamic_terrain_descriptions,
+        &new_map,
+        &hide_mapper,
+    ] {
+        bind_preferences_keys(control, dialog);
+    }
+    for control in [&ok, &cancel] {
+        bind_preferences_keys(control, dialog);
+    }
+    bind_preferences_keys(&dialog, dialog);
 
     let dialog_ok = dialog;
     ok.on_click(move |_| dialog_ok.end_modal(ID_OK));
@@ -570,7 +874,10 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
             FeedbackMode::Sounds
         };
         updated.feedback.announce_directions = directions.get_value();
+        updated.feedback.use_diagonal_directions = diagonal_directions.get_value();
+        updated.feedback.dynamic_terrain_descriptions = dynamic_terrain_descriptions.get_value();
         updated.feedback.new_map_alert = new_map.get_value();
+        updated.window.hide_mapper_when_switching_to_mudlet = hide_mapper.get_value();
         if updated.feedback.mode == FeedbackMode::Sounds && !sounds_complete {
             MessageDialog::builder(
                 parent,
@@ -590,6 +897,7 @@ fn preferences(parent: &Frame, current: &Config, sounds_complete: bool) -> Optio
 }
 
 fn accept_map(grid: &Grid, state: &Rc<RefCell<State>>, map: Map) {
+    let terrain_catalog = TerrainCatalog::from_map(&map);
     resize_grid(grid, map.size as i32);
     for row in 0..map.size {
         for column in 0..map.size {
@@ -618,6 +926,8 @@ fn accept_map(grid: &Grid, state: &Rc<RefCell<State>>, map: Map) {
     grid.make_cell_visible(cursor.row as i32, cursor.column as i32);
     grid.refresh(false, None);
     let mut state = state.borrow_mut();
+    state.terrain_menu = None;
+    state.terrain_catalog = Some(terrain_catalog);
     state.cursor = Some(cursor);
     state.last_map = Some(Instant::now());
     log::info!(
@@ -713,5 +1023,94 @@ mod accessibility_tests {
             (AccStatus::Ok, Some("Speech and sounds".into()))
         );
         assert_eq!(accessible.get_name(1), (AccStatus::NotImplemented, None));
+    }
+
+    #[test]
+    fn preferences_accepts_both_enter_keys_and_cancels_with_escape() {
+        let plain = KeyModifiers::default();
+        assert_eq!(
+            classify_preferences_key(KEY_ENTER, plain),
+            PreferencesKeyAction::Accept
+        );
+        assert_eq!(
+            classify_preferences_key(KEY_NUMPAD_ENTER, plain),
+            PreferencesKeyAction::Accept
+        );
+        assert_eq!(
+            classify_preferences_key(KEY_ESCAPE, plain),
+            PreferencesKeyAction::Cancel
+        );
+    }
+
+    #[test]
+    fn preferences_passes_through_unrelated_and_modified_keys() {
+        assert_eq!(
+            classify_preferences_key(0, KeyModifiers::default()),
+            PreferencesKeyAction::PassThrough
+        );
+        for modifiers in [
+            KeyModifiers {
+                control: true,
+                ..KeyModifiers::default()
+            },
+            KeyModifiers {
+                shift: true,
+                ..KeyModifiers::default()
+            },
+            KeyModifiers {
+                alt: true,
+                ..KeyModifiers::default()
+            },
+            KeyModifiers {
+                meta: true,
+                ..KeyModifiers::default()
+            },
+        ] {
+            assert_eq!(
+                classify_preferences_key(KEY_ENTER, modifiers),
+                PreferencesKeyAction::PassThrough
+            );
+            assert_eq!(
+                classify_preferences_key(KEY_ESCAPE, modifiers),
+                PreferencesKeyAction::PassThrough
+            );
+        }
+    }
+
+    #[test]
+    fn mapper_hides_only_when_enabled_and_mudlet_activation_succeeds() {
+        assert!(!should_hide_mapper(false, false));
+        assert!(!should_hide_mapper(false, true));
+        assert!(!should_hide_mapper(true, false));
+        assert!(should_hide_mapper(true, true));
+    }
+
+    #[test]
+    fn mapper_hides_after_foreground_only_when_paired_mudlet_is_foreground() {
+        assert!(!should_hide_mapper_after_foreground(
+            false,
+            true,
+            Some(10),
+            Some(10)
+        ));
+        assert!(!should_hide_mapper_after_foreground(
+            true,
+            false,
+            Some(10),
+            Some(10)
+        ));
+        assert!(!should_hide_mapper_after_foreground(
+            true,
+            true,
+            Some(10),
+            Some(11)
+        ));
+        assert!(!should_hide_mapper_after_foreground(true, true, None, Some(10)));
+        assert!(should_hide_mapper_after_foreground(
+            true,
+            true,
+            Some(10),
+            Some(10)
+        ));
     }
 }

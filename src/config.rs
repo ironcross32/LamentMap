@@ -30,6 +30,8 @@ impl FeedbackMode {
 pub struct FeedbackConfig {
     pub mode: FeedbackMode,
     pub announce_directions: bool,
+    pub use_diagonal_directions: bool,
+    pub dynamic_terrain_descriptions: bool,
     pub new_map_alert: bool,
 }
 
@@ -38,9 +40,17 @@ impl Default for FeedbackConfig {
         Self {
             mode: FeedbackMode::SpeechAndSounds,
             announce_directions: true,
+            use_diagonal_directions: false,
+            dynamic_terrain_descriptions: true,
             new_map_alert: true,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowConfig {
+    pub hide_mapper_when_switching_to_mudlet: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +58,7 @@ impl Default for FeedbackConfig {
 pub struct Config {
     pub version: u32,
     pub feedback: FeedbackConfig,
+    pub window: WindowConfig,
 }
 
 impl Default for Config {
@@ -55,6 +66,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             feedback: FeedbackConfig::default(),
+            window: WindowConfig::default(),
         }
     }
 }
@@ -179,6 +191,54 @@ mod tests {
         let (config, recovery) = load_or_repair(&path).unwrap();
         assert_eq!(config.feedback.mode, FeedbackMode::Speech);
         assert!(config.feedback.announce_directions);
+        assert!(!config.feedback.use_diagonal_directions);
+        assert!(config.feedback.dynamic_terrain_descriptions);
+        assert!(!config.window.hide_mapper_when_switching_to_mudlet);
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(recovery, ConfigRecovery::Existing);
+    }
+
+    #[test]
+    fn saves_and_loads_diagonal_direction_preference() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = Config::default();
+        config.feedback.use_diagonal_directions = true;
+        save_atomic(&path, &config).unwrap();
+
+        let (loaded, recovery) = load_or_repair(&path).unwrap();
+        assert!(loaded.feedback.use_diagonal_directions);
+        assert_eq!(recovery, ConfigRecovery::Existing);
+    }
+
+    #[test]
+    fn saves_and_loads_both_dynamic_terrain_description_states() {
+        for enabled in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.toml");
+            let mut config = Config::default();
+            config.feedback.dynamic_terrain_descriptions = enabled;
+            save_atomic(&path, &config).unwrap();
+
+            let (loaded, recovery) = load_or_repair(&path).unwrap();
+            assert_eq!(loaded.feedback.dynamic_terrain_descriptions, enabled);
+            assert_eq!(loaded.version, 1);
+            assert_eq!(recovery, ConfigRecovery::Existing);
+        }
+    }
+
+    #[test]
+    fn saves_and_loads_hide_mapper_preference_without_a_version_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut config = Config::default();
+        config.window.hide_mapper_when_switching_to_mudlet = true;
+        save_atomic(&path, &config).unwrap();
+
+        let (loaded, recovery) = load_or_repair(&path).unwrap();
+        assert!(loaded.window.hide_mapper_when_switching_to_mudlet);
+        assert_eq!(loaded.version, 1);
+        assert_eq!(CONFIG_VERSION, 1);
         assert_eq!(recovery, ConfigRecovery::Existing);
     }
 

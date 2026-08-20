@@ -45,5 +45,7 @@ tempfile = "3.21.0"
 embed-manifest = "=1.5.0"
 
 [profile.release]
+codegen-units = 1
 lto = "thin"
+panic = "abort"
 strip = true
